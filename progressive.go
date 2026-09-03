@@ -115,6 +115,12 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 // scrollback, so there's no way to draw there without corrupting whatever
 // now occupies that row. Entries are processed nearest-to-bottom (most
 // likely still on screen) first.
+//
+// The cursor is hidden (DECTCEM, CSI ?25l) for the duration of the whole
+// concurrent drawing pass and shown again once every draw has finished:
+// without this, each entry's own save/jump/draw/restore is visibly
+// distracting -- the cursor appears to hop around the screen as thumbnails
+// land -- even though the final result is correct either way.
 func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, termHeight int) {
 	starts := make([]int, len(plans))
 	totalRows := 0
@@ -133,6 +139,9 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 		return
 	}
 	sort.SliceStable(order, func(a, b int) bool { return starts[order[a]] > starts[order[b]] })
+
+	fmt.Print("\033[?25l")       // DECTCEM off: hide cursor
+	defer fmt.Print("\033[?25h") // DECTCEM on: show cursor again
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
