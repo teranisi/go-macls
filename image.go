@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -315,6 +316,48 @@ func boxDownsample(src image.Image, newW, newH int) *image.RGBA {
 	return dst
 }
 
+// convertHeicForThumbnail converts a HEIC/HEIF file to PNG bytes using
+// macOS's built-in `sips` command-line tool -- Apple's own HEIC/HEIF
+// decoder. There's no practical way to decode HEIC in pure Go (it's
+// built on HEVC/H.265 video compression, patent-encumbered and complex
+// enough that neither the standard library nor golang.org/x/image
+// support it), so unlike PNG/JPEG/GIF this can't reuse image.Decode();
+// shelling out to a real decoder already installed on the target
+// platform matches how this port already delegates ls(1)'s own output
+// rather than reimplementing it. Once converted, the PNG data flows
+// through the exact same aspect-ratio and downscaleForThumbnail() logic
+// as a real PNG file (see buildImagePrefix()).
+//
+// Returns ok=false if sips isn't on PATH (e.g. not running on macOS) or
+// the conversion fails for any reason, in which case the caller falls
+// back to embedding the original HEIC/HEIF file unchanged -- same as any
+// other format this port can't do anything special with.
+func convertHeicForThumbnail(path string) ([]byte, bool) {
+	sipsPath, err := exec.LookPath("sips")
+	if err != nil {
+		return nil, false
+	}
+	tmp, err := os.CreateTemp("", "macls-heic-*.png")
+	if err != nil {
+		return nil, false
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
+	cmd := exec.Command(sipsPath, "-s", "format", "png", path, "--out", tmpPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
 // buildImagePrefix returns the escape sequence that renders the image at
 // path as a thumbnail of `width` cells wide using iTerm2's inline image
 // protocol (OSC 1337). Returns "" if the file isn't an image or can't be
@@ -338,6 +381,12 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return ""
+	}
+
+	if ext == ".heic" || ext == ".heif" {
+		if converted, ok := convertHeicForThumbnail(path); ok {
+			data, ext = converted, ".png"
+		}
 	}
 
 	if allowAspectHeight {
