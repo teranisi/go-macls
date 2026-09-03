@@ -19,7 +19,7 @@ const (
 // Python original's Options docstring for field semantics.
 type Options struct {
 	a, A, l, h, f, one, c, i, t, d, b, r, s, x, reverse bool
-	quote, groupDirsFirst, stripe                       bool
+	quote, groupDirsFirst, stripe, paging               bool
 
 	color       string
 	theme       string
@@ -73,7 +73,7 @@ var maclsOnlyLongOpts = func() []string {
 	for _, m := range modeOptions {
 		opts = append(opts, m.name)
 	}
-	return append(opts, "--quote", "--group-directories-first", "--stripe", "--base-fg", "--scale")
+	return append(opts, "--quote", "--group-directories-first", "--stripe", "--base-fg", "--scale", "--paging")
 }()
 
 func stripMaclsOnlyOptions(argv []string) []string {
@@ -251,6 +251,11 @@ func parseOptions(argv []string) (*Options, []string) {
 			i++
 			continue
 		}
+		if arg == "--paging" {
+			opts.paging = true
+			i++
+			continue
+		}
 		if arg == "--base-fg" || strings.HasPrefix(arg, "--base-fg=") {
 			value := valueOf(arg)
 			c, ok := parseHexRGB(value)
@@ -381,7 +386,7 @@ func execFallback(argv []string, env []string) {
 }
 
 func printHelp() {
-	fmt.Printf(`Usage: %s [-a] [-A] [-l] [-h] [-1] [-C] [-F] [-I] [--scale=n] [-t] [-S] [-X] [-r] [-d] [-R] [-B] [--color=when] [--theme=mode] [--tag-colors=mode] [--columns=mode] [--tag=mode] [--stripe] [--suffix-color=mode] [--fg-mode=mode] [--base-fg=RRGGBB] [--quote] [--group-directories-first] [--version] [path...]
+	fmt.Printf(`Usage: %s [-a] [-A] [-l] [-h] [-1] [-C] [-F] [-I] [--scale=n] [--paging] [-t] [-S] [-X] [-r] [-d] [-R] [-B] [--color=when] [--theme=mode] [--tag-colors=mode] [--columns=mode] [--tag=mode] [--stripe] [--suffix-color=mode] [--fg-mode=mode] [--base-fg=RRGGBB] [--quote] [--group-directories-first] [--version] [path...]
 
 Options:
   -a        Show all files, including . and ..
@@ -400,6 +405,13 @@ Options:
             effect only in -1/-l (the only contexts -I itself is ever
             active in, since it's disabled outright on non-tty output).
             Omitting n is the same as 1. No effect without -I.
+  --paging  Print the text listing immediately and fill in -I thumbnails
+            afterward as they finish loading, pausing with a
+            more(1)-style "-- more --" prompt (space to continue, q to
+            quit) whenever the listing doesn't fit on one screen.
+            Without --paging (the default), -I waits for every
+            thumbnail to be ready before printing anything, but never
+            pauses partway through a long listing. No effect without -I.
   -t        Sort by modification time, newest first
   -S        Sort by file size, largest first
   -X        Sort by extension

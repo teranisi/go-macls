@@ -28,17 +28,18 @@ implements the same CLI surface.
 - Everything else — every flag, every color rule, the compact column
   layout algorithm, `--quote`/ANSI-C quoting, the unsupported-option
   fallback to real `ls` — is a direct, behavior-for-behavior port.
-- **`-I` thumbnails render progressively, with pagination.** The Python
-  original reads and base64-encodes every thumbnail before printing
-  anything, so a directory with many (or large) images blocks the whole
-  listing until every image is ready. This port instead prints the text
-  listing immediately — names, `-l`'s permissions/dates, etc. — with each
-  entry's thumbnail filled in afterward as it finishes loading,
-  concurrently, via cursor positioning. This applies both to `-1`/`-l`
-  (one entry per line) and to multi-column output.
+- **`--paging`, an extra option with no equivalent in the Python
+  original.** By default, `-I` behaves like the original: it waits for
+  every thumbnail to be read and (as of this port) downscaled before
+  printing anything, but the listing itself never pauses partway through.
+  `--paging` instead prints the text listing immediately — names, `-l`'s
+  permissions/dates, etc. — with each entry's thumbnail filled in
+  afterward as it finishes loading, concurrently, via cursor positioning.
+  This applies both to `-1`/`-l` (one entry per line) and to multi-column
+  output. No effect without `-I`.
 
-  If the listing doesn't fit on one screen, output pauses after each
-  screenful with a `more(1)`-style prompt:
+  If the listing doesn't fit on one screen, `--paging` output pauses
+  after each screenful with a `more(1)`-style prompt:
 
   ```
   -- more (space to continue, q to quit) --

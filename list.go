@@ -404,8 +404,8 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		}
 	}
 
-	progressive := opts.i && scaleApplies
-	progressiveMulti := opts.i && multi
+	progressive := opts.i && scaleApplies && opts.paging
+	progressiveMulti := opts.i && multi && opts.paging
 	var imgPrefixes, imgSuffixes []string
 	var imgColWidth int
 	var progressivePlans []imagePlan
