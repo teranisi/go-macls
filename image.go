@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -103,6 +104,47 @@ func jpegPixelSize(data []byte) (int, int, bool) {
 	return 0, 0, false
 }
 
+// aspectScaledHeight computes a thumbnail's height (in cells) from an
+// image's real pixel size, for a given cell width, via CELL_ASPECT_RATIO.
+// Always at least 1.
+func aspectScaledHeight(width, pxW, pxH int) int {
+	h := int(round(float64(width) * (float64(pxH) / float64(pxW)) / cellAspectRatio))
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// imagePeekBytes bounds how much of an image file peekImagePixelSize()
+// reads to determine its pixel dimensions -- generous enough to reach the
+// PNG/GIF/BMP header (always near the very start of the file) or a JPEG's
+// SOF marker (usually within the first few embedded metadata segments),
+// while staying far cheaper than reading and base64-encoding the entire
+// file (which buildImagePrefix() still does once the image is actually
+// drawn).
+const imagePeekBytes = 256 * 1024
+
+// peekImagePixelSize is like getImagePixelSize(), but reads only a bounded
+// prefix of path's contents rather than the whole file -- for callers (see
+// planProgressiveImages()) that need an image's pixel dimensions cheaply,
+// well before they're ready to pay for reading and encoding the whole
+// file. A JPEG whose SOF marker lies beyond imagePeekBytes returns
+// ok=false, same as an unparseable format -- the caller falls back to a
+// flat, non-aspect-scaled height for that one image.
+func peekImagePixelSize(path, ext string) (w, h int, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+	buf := make([]byte, imagePeekBytes)
+	n, _ := io.ReadFull(f, buf)
+	if n <= 0 {
+		return 0, 0, false
+	}
+	return getImagePixelSize(buf[:n], ext)
+}
+
 // getImagePixelSize returns (width, height) in pixels for image file
 // contents data with extension ext, or ok=false if ext isn't one of the
 // supported formats or data couldn't be parsed as one.
@@ -152,11 +194,7 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 
 	if allowAspectHeight {
 		if pxW, pxH, ok := getImagePixelSize(data, ext); ok && pxW > 0 && pxH > 0 {
-			h := int(round(float64(width) * (float64(pxH) / float64(pxW)) / cellAspectRatio))
-			if h < 1 {
-				h = 1
-			}
-			height = h
+			height = aspectScaledHeight(width, pxW, pxH)
 		}
 	}
 

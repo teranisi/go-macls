@@ -400,7 +400,17 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		}
 	}
 
-	imgPrefixes, imgSuffixes, imgColWidth := buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies)
+	progressive := opts.i && scaleApplies
+	var imgPrefixes, imgSuffixes []string
+	var imgColWidth int
+	var progressivePlans []imagePlan
+	termHeight := getTerminalHeight()
+	if progressive {
+		progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags)
+		imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
+	} else {
+		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies)
+	}
 
 	m := buildEntries(names, fullPaths, sanitizedNames, needsQuote, ansiCNeeded, anyQuoted, opts, imgColWidth)
 
@@ -429,6 +439,10 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 
 	if len(output) > 0 {
 		fmt.Print(strings.Join(output, "\n") + "\n")
+	}
+
+	if progressive {
+		renderProgressiveImages(fullPaths, progressivePlans, imgWidth, termHeight)
 	}
 
 	if joinIsDir && opts.r && !opts.d {
