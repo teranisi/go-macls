@@ -229,25 +229,67 @@ func downscaleForThumbnail(data []byte, ext string, maxDim int) ([]byte, bool) {
 
 // boxDownsample resizes src to exactly newW x newH by averaging each
 // destination pixel's corresponding source box.
+// boxDownsampleMaxSamplesPerAxis bounds how many source pixels
+// boxDownsample() samples per axis for each destination pixel's box,
+// regardless of how large that box actually is. Averaging every source
+// pixel is O(source width * source height) in total -- for a multi-
+// megapixel photo shrunk to a thumbnail a few dozen pixels across, the
+// vast majority of that work goes into boxes with thousands of source
+// pixels each, and image.Image.At() (a per-pixel interface call --
+// color-converting from YCbCr for a decoded JPEG, in particular) isn't
+// cheap to call millions of times. Sampling a bounded, evenly-spaced grid
+// per box instead makes the total cost O(destination width * destination
+// height), independent of the source image's resolution, at a barely
+// perceptible quality cost for something displayed this small (iTerm2
+// also does its own final scaling/antialiasing when it draws the
+// thumbnail).
+const boxDownsampleMaxSamplesPerAxis = 4
+
+// sampleCoords returns up to maxSamples evenly spaced integer coordinates
+// covering [lo, hi), or every coordinate in that range if it's already no
+// more than maxSamples wide.
+func sampleCoords(lo, hi, maxSamples int) []int {
+	n := hi - lo
+	if n <= maxSamples {
+		coords := make([]int, n)
+		for i := range coords {
+			coords[i] = lo + i
+		}
+		return coords
+	}
+	coords := make([]int, maxSamples)
+	for i := 0; i < maxSamples; i++ {
+		coords[i] = lo + i*n/maxSamples
+	}
+	return coords
+}
+
 func boxDownsample(src image.Image, newW, newH int) *image.RGBA {
 	bounds := src.Bounds()
 	srcW, srcH := bounds.Dx(), bounds.Dy()
 	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
+
+	xSamples := make([][]int, newW)
+	for x := 0; x < newW; x++ {
+		sx0 := bounds.Min.X + x*srcW/newW
+		sx1 := bounds.Min.X + (x+1)*srcW/newW
+		if sx1 <= sx0 {
+			sx1 = sx0 + 1
+		}
+		xSamples[x] = sampleCoords(sx0, sx1, boxDownsampleMaxSamplesPerAxis)
+	}
+
 	for y := 0; y < newH; y++ {
 		sy0 := bounds.Min.Y + y*srcH/newH
 		sy1 := bounds.Min.Y + (y+1)*srcH/newH
 		if sy1 <= sy0 {
 			sy1 = sy0 + 1
 		}
+		ySamples := sampleCoords(sy0, sy1, boxDownsampleMaxSamplesPerAxis)
 		for x := 0; x < newW; x++ {
-			sx0 := bounds.Min.X + x*srcW/newW
-			sx1 := bounds.Min.X + (x+1)*srcW/newW
-			if sx1 <= sx0 {
-				sx1 = sx0 + 1
-			}
 			var r, g, b, a, n uint64
-			for sy := sy0; sy < sy1; sy++ {
-				for sx := sx0; sx < sx1; sx++ {
+			for _, sy := range ySamples {
+				for _, sx := range xSamples[x] {
 					pr, pg, pb, pa := src.At(sx, sy).RGBA()
 					r += uint64(pr)
 					g += uint64(pg)
