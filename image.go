@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -315,6 +316,66 @@ func boxDownsample(src image.Image, newW, newH int) *image.RGBA {
 	return dst
 }
 
+// heicMaxDimSafetyFactor inflates convertHeicForThumbnail()'s resize
+// target (see its own doc comment) beyond a flat width*thumbnailPxPerCell,
+// to still cover a strongly portrait-oriented photo adequately: the target
+// is picked before this image's own aspect ratio is known (avoiding a
+// separate metadata-only sips call just to learn it up front), so this
+// errs generous rather than risk shortchanging the thumbnail's longer
+// dimension. 3x covers up to a 3:1 aspect ratio at full requested
+// resolution -- beyond typical even for a portrait phone photo -- while
+// still being a tiny fraction of a real photo's own resolution.
+const heicMaxDimSafetyFactor = 3
+
+// convertHeicForThumbnail converts a HEIC/HEIF file to a PNG already
+// downscaled to fit within maxDim x maxDim, using macOS's built-in `sips`
+// command-line tool -- Apple's own HEIC/HEIF decoder. There's no
+// practical way to decode HEIC in pure Go (it's built on HEVC/H.265 video
+// compression, patent-encumbered and complex enough that neither the
+// standard library nor golang.org/x/image support it), so unlike PNG/
+// JPEG/GIF this can't reuse image.Decode(); shelling out to a real
+// decoder already installed on the target platform matches how this port
+// already delegates ls(1)'s own output rather than reimplementing it.
+//
+// Doing the resize as part of the same sips invocation (-Z), rather than
+// converting at full resolution and letting downscaleForThumbnail()
+// shrink it afterward in Go, means Apple's own decode path never has to
+// materialize the image at full resolution just to have it immediately
+// shrunk again -- a real speed difference for a multi-megapixel phone
+// photo. The resulting PNG is already at or under maxDim on both axes, so
+// downscaleForThumbnail() downstream (see buildImagePrefix()) becomes a
+// cheap no-op for it rather than a second real resize.
+//
+// Returns ok=false if sips isn't on PATH (e.g. not running on macOS) or
+// the conversion fails for any reason, in which case the caller falls
+// back to embedding the original HEIC/HEIF file unchanged -- same as any
+// other format this port can't do anything special with.
+func convertHeicForThumbnail(path string, maxDim int) ([]byte, bool) {
+	sipsPath, err := exec.LookPath("sips")
+	if err != nil {
+		return nil, false
+	}
+	tmp, err := os.CreateTemp("", "macls-heic-*.png")
+	if err != nil {
+		return nil, false
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
+	cmd := exec.Command(sipsPath, "-Z", strconv.Itoa(maxDim), "-s", "format", "png", path, "--out", tmpPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
 // buildImagePrefix returns the escape sequence that renders the image at
 // path as a thumbnail of `width` cells wide using iTerm2's inline image
 // protocol (OSC 1337). Returns "" if the file isn't an image or can't be
@@ -338,6 +399,13 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return ""
+	}
+
+	if ext == ".heic" || ext == ".heif" {
+		heicMaxDim := width * thumbnailPxPerCell * heicMaxDimSafetyFactor
+		if converted, ok := convertHeicForThumbnail(path, heicMaxDim); ok {
+			data, ext = converted, ".png"
+		}
 	}
 
 	if allowAspectHeight {

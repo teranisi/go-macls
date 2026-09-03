@@ -28,6 +28,18 @@ implements the same CLI surface.
 - Everything else — every flag, every color rule, the compact column
   layout algorithm, `--quote`/ANSI-C quoting, the unsupported-option
   fallback to real `ls` — is a direct, behavior-for-behavior port.
+- **HEIC/HEIF `-I` thumbnails are decoded, not just embedded raw.** The
+  Python original (like every other format it can't parse the header of)
+  just embeds a HEIC/HEIF file's raw bytes and hopes the terminal can
+  decode it. There's no practical way to decode HEIC in pure Go (it's
+  built on patent-encumbered HEVC/H.265 compression, unsupported by both
+  the standard library and `golang.org/x/image`), so this port instead
+  shells out to macOS's own `sips` command-line tool — the same approach
+  already used for `ls -l`'s own output — to convert it to PNG first, then
+  runs that through the same downscaling as a real PNG file (see below).
+  Falls back to embedding the file unchanged, matching the original
+  behavior, if `sips` isn't on `PATH` (e.g. not running on macOS) or the
+  conversion fails for any reason.
 - **`--paging`, an extra option with no equivalent in the Python
   original.** By default, `-I` behaves like the original: it waits for
   every thumbnail to be read and (as of this port) downscaled before
