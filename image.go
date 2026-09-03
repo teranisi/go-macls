@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -167,6 +173,106 @@ func getImagePixelSize(data []byte, ext string) (w, h int, ok bool) {
 	return 0, 0, false
 }
 
+// thumbnailPxPerCell is the assumed pixel density (generous, for a sharp
+// result even on a hidpi display) per terminal cell used to size
+// downscaleForThumbnail()'s target -- see buildImagePrefix().
+const thumbnailPxPerCell = 64
+
+// downscaleForThumbnail decodes image file contents data (PNG/JPEG/GIF --
+// the formats Go's standard library can decode without an extra
+// dependency) and, if its pixel dimensions exceed maxDim on the longer
+// side, resizes it down (a simple box-average downsample -- more than
+// adequate at the tiny size a terminal thumbnail actually renders at) and
+// re-encodes it as PNG. Returns ok=false, meaning the caller should keep
+// using the original data unchanged, if ext isn't decodable, the data
+// doesn't parse, the image is already small enough that resizing wouldn't
+// shrink it, or re-encoding somehow didn't come out smaller.
+//
+// This exists because embedding the entire original file, however large,
+// sends it -- base64-encoded, inline in an OSC 1337 escape sequence --
+// over the terminal's own I/O channel even though the displayed thumbnail
+// is only a few dozen pixels across at most: a multi-megapixel photo can
+// be megabytes of data sent (and, over a slow pty/SSH link, waited on)
+// just to end up shrunk to a few cells wide.
+func downscaleForThumbnail(data []byte, ext string, maxDim int) ([]byte, bool) {
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif":
+	default:
+		return nil, false
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, false
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 || (w <= maxDim && h <= maxDim) {
+		return nil, false
+	}
+
+	scale := float64(maxDim) / float64(w)
+	if s := float64(maxDim) / float64(h); s < scale {
+		scale = s
+	}
+	newW := maxInt(1, int(float64(w)*scale))
+	newH := maxInt(1, int(float64(h)*scale))
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, boxDownsample(img, newW, newH)); err != nil {
+		return nil, false
+	}
+	if buf.Len() >= len(data) {
+		return nil, false
+	}
+	return buf.Bytes(), true
+}
+
+// boxDownsample resizes src to exactly newW x newH by averaging each
+// destination pixel's corresponding source box.
+func boxDownsample(src image.Image, newW, newH int) *image.RGBA {
+	bounds := src.Bounds()
+	srcW, srcH := bounds.Dx(), bounds.Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
+	for y := 0; y < newH; y++ {
+		sy0 := bounds.Min.Y + y*srcH/newH
+		sy1 := bounds.Min.Y + (y+1)*srcH/newH
+		if sy1 <= sy0 {
+			sy1 = sy0 + 1
+		}
+		for x := 0; x < newW; x++ {
+			sx0 := bounds.Min.X + x*srcW/newW
+			sx1 := bounds.Min.X + (x+1)*srcW/newW
+			if sx1 <= sx0 {
+				sx1 = sx0 + 1
+			}
+			var r, g, b, a, n uint64
+			for sy := sy0; sy < sy1; sy++ {
+				for sx := sx0; sx < sx1; sx++ {
+					pr, pg, pb, pa := src.At(sx, sy).RGBA()
+					r += uint64(pr)
+					g += uint64(pg)
+					b += uint64(pb)
+					a += uint64(pa)
+					n++
+				}
+			}
+			if n == 0 {
+				n = 1
+			}
+			// src.At().RGBA() and color.RGBA are both alpha-premultiplied,
+			// so averaging in that space and truncating to 8 bits needs no
+			// unpremultiply/re-premultiply step.
+			dst.SetRGBA(x, y, color.RGBA{
+				R: uint8(r / n >> 8),
+				G: uint8(g / n >> 8),
+				B: uint8(b / n >> 8),
+				A: uint8(a / n >> 8),
+			})
+		}
+	}
+	return dst
+}
+
 // buildImagePrefix returns the escape sequence that renders the image at
 // path as a thumbnail of `width` cells wide using iTerm2's inline image
 // protocol (OSC 1337). Returns "" if the file isn't an image or can't be
@@ -200,6 +306,11 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 
 	if height > termHeight {
 		height = termHeight
+	}
+
+	maxDim := maxInt(width, height) * thumbnailPxPerCell
+	if small, ok := downscaleForThumbnail(data, ext, maxDim); ok {
+		data = small
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(data)
