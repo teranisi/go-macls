@@ -3,6 +3,7 @@ package main
 import (
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 	"howett.net/plist"
@@ -93,6 +94,39 @@ func getDisplayTagInfo(path string, tagMode string) (tagnums []int, bgNum *int, 
 	}
 	last := tagnums[len(tagnums)-1]
 	return tagnums, &last, tagnums[:len(tagnums)-1], allTags
+}
+
+// tagLookupConcurrency bounds how many getFinderTags() (getxattr syscall)
+// lookups run at once (see fetchTagLookups()), same rationale as
+// imagePrefixConcurrency in image.go: each lookup is an independent
+// per-file syscall, so running them concurrently cuts the total time for a
+// large listing roughly in proportion to this bound.
+const tagLookupConcurrency = 16
+
+type tagLookup struct {
+	bgNum      *int
+	dotTagnums []int
+	allTags    []finderTag
+}
+
+// fetchTagLookups runs getDisplayTagInfo() for every path in fullPaths
+// concurrently, returning results in the same order.
+func fetchTagLookups(fullPaths []string, tagMode string) []tagLookup {
+	results := make([]tagLookup, len(fullPaths))
+	sem := make(chan struct{}, tagLookupConcurrency)
+	var wg sync.WaitGroup
+	for i, p := range fullPaths {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, p string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			_, bgNum, dotTagnums, allTags := getDisplayTagInfo(p, tagMode)
+			results[i] = tagLookup{bgNum, dotTagnums, allTags}
+		}(i, p)
+	}
+	wg.Wait()
+	return results
 }
 
 // dotExtraWidth returns the display width added by build_colored_name's

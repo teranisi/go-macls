@@ -123,6 +123,13 @@ func buildEntries(names, fullPaths, sanitizedNames []string, needsQuote, ansiCNe
 		namelen:      make([]int, n),
 		plainlen:     make([]int, n),
 	}
+
+	var tagLookups []tagLookup
+	needTags := opts.tag != "off" && (opts.useColor || opts.tag == "str")
+	if needTags {
+		tagLookups = fetchTagLookups(fullPaths, opts.tag)
+	}
+
 	for i := range names {
 		p := fullPaths[i]
 		dispName := sanitizedNames[i]
@@ -144,15 +151,15 @@ func buildEntries(names, fullPaths, sanitizedNames []string, needsQuote, ansiCNe
 		var dotTagnums []int
 		var tags []finderTag
 		tagExtra := 0
-		if opts.tag != "off" && (opts.useColor || opts.tag == "str") {
-			_, bg, dots, allTags := getDisplayTagInfo(p, opts.tag)
-			bgNum, dotTagnums = bg, dots
+		if needTags {
+			lookup := tagLookups[i]
+			bgNum, dotTagnums = lookup.bgNum, lookup.dotTagnums
 			if !opts.useColor {
 				bgNum, dotTagnums = nil, nil
 			}
 			if opts.tag == "str" {
-				tags = allTags
-				_, tagExtra = buildTagLabel(allTags, false, opts.useTruecolor, opts.tagColors, "")
+				tags = lookup.allTags
+				_, tagExtra = buildTagLabel(tags, false, opts.useTruecolor, opts.tagColors, "")
 			}
 		}
 
