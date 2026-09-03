@@ -2,11 +2,22 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"golang.org/x/term"
 )
+
+// pagerQuit is set once the user quits out of a --more-style pagination
+// prompt (see waitForContinue()). listTarget() checks it before doing any
+// further work -- including further pages of the current section, further
+// -R recursion, and (see main.go's directory loop) any remaining directory
+// arguments -- so quitting stops the whole listing, not just the current
+// page.
+var pagerQuit bool
 
 // imagePlan is the reserved layout for one entry's -I thumbnail in
 // progressive mode (see renderProgressiveImages()): decided from a cheap
@@ -156,4 +167,94 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 		}(i, rowsUp)
 	}
 	wg.Wait()
+}
+
+// pagerPromptRows is how many terminal rows printPaginated() reserves for
+// its own "-- more --" prompt at the bottom of each page, so the prompt
+// itself never pushes the page's own last row off screen.
+const pagerPromptRows = 1
+
+// printPaginated prints entryLines (one already-rendered line per entry,
+// each possibly containing embedded "\n"s for an entry's own reserved
+// thumbnail rows -- see progressiveTextLayout()) a screenful at a time,
+// rendering each page's thumbnails (see renderProgressiveImages()) before
+// moving on. Every entry within a page is guaranteed to still be on screen
+// when its thumbnail is drawn (a page never holds more than a terminal
+// height's worth of rows), unlike a single unpaginated dump of the whole
+// listing, where entries past the first screenful scroll off before their
+// image ever gets drawn.
+//
+// When there's more than one page and standard input is a terminal, it
+// pauses after each page but the last with a "-- more --" prompt (see
+// waitForContinue()); otherwise (input isn't interactive) it just keeps
+// going without pausing, matching how a non-interactive pager falls back
+// to a plain dump rather than hanging.
+func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, imgWidth, termHeight int) {
+	n := minInt(len(entryLines), len(plans))
+	if n == 0 {
+		return
+	}
+	entryLines, plans, fullPaths = entryLines[:n], plans[:n], fullPaths[:n]
+
+	pageCapacity := termHeight - pagerPromptRows
+	if pageCapacity < 1 {
+		pageCapacity = 1
+	}
+	canPrompt := term.IsTerminal(int(os.Stdin.Fd()))
+
+	i := 0
+	for i < n {
+		start := i
+		rows := 0
+		for i < n {
+			r := plans[i].rows()
+			if rows > 0 && rows+r > pageCapacity {
+				break
+			}
+			rows += r
+			i++
+		}
+
+		fmt.Print(strings.Join(entryLines[start:i], "\n") + "\n")
+		renderProgressiveImages(fullPaths[start:i], plans[start:i], imgWidth, termHeight)
+
+		if i < n && canPrompt {
+			if !waitForContinue() {
+				pagerQuit = true
+				return
+			}
+		}
+	}
+}
+
+// waitForContinue prints a "-- more --" prompt and blocks for a single
+// keypress on standard input, put into raw mode for the duration so the
+// key doesn't need Enter and isn't echoed. Space (or Enter) continues to
+// the next page; q, Ctrl-C, or Esc quits; anything else is ignored and it
+// keeps waiting, same as a traditional more(1)/less(1) prompt. Returns
+// false only for the quit case.
+func waitForContinue() bool {
+	fmt.Print("-- more (space to continue, q to quit) --")
+	defer fmt.Print("\r\033[K") // erase the prompt before the next page
+
+	fd := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return true
+	}
+	defer term.Restore(fd, oldState)
+
+	buf := make([]byte, 1)
+	for {
+		nRead, err := os.Stdin.Read(buf)
+		if err != nil || nRead == 0 {
+			return true
+		}
+		switch buf[0] {
+		case ' ', '\r', '\n':
+			return true
+		case 'q', 'Q', 3 /* Ctrl-C */, 27 /* Esc */ :
+			return false
+		}
+	}
 }

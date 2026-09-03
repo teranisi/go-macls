@@ -91,6 +91,9 @@ func run() int {
 	}
 
 	for _, d := range dirArgs {
+		if pagerQuit {
+			break
+		}
 		if sectionPrinted {
 			fmt.Println()
 		}
