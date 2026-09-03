@@ -131,7 +131,16 @@ func getImagePixelSize(data []byte, ext string) (w, h int, ok bool) {
 // read. termHeight is the terminal's height (see getTerminalHeight()),
 // passed in rather than queried here so a caller building many prefixes at
 // once (see buildImagePrefixes()) only pays for that syscall once.
-func buildImagePrefix(path string, width, height, termHeight int) string {
+//
+// allowAspectHeight lets a portrait image grow past `height` rows to match
+// its own aspect ratio (see the single_line thumbnails in
+// buildImagePrefixes()). It must be false in multi-column output: several
+// entries there share one physical terminal line, drawn as one continuous
+// stream with no cursor tricks between them, so a thumbnail taller than 1
+// row would drag the cursor down mid-line and misplace everything printed
+// after it in that row -- including, for the entry the tall thumbnail
+// belongs to, its own name.
+func buildImagePrefix(path string, width, height, termHeight int, allowAspectHeight bool) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	if !imageExtensions[ext] {
 		return ""
@@ -141,12 +150,14 @@ func buildImagePrefix(path string, width, height, termHeight int) string {
 		return ""
 	}
 
-	if pxW, pxH, ok := getImagePixelSize(data, ext); ok && pxW > 0 && pxH > 0 {
-		h := int(round(float64(width) * (float64(pxH) / float64(pxW)) / cellAspectRatio))
-		if h < 1 {
-			h = 1
+	if allowAspectHeight {
+		if pxW, pxH, ok := getImagePixelSize(data, ext); ok && pxW > 0 && pxH > 0 {
+			h := int(round(float64(width) * (float64(pxH) / float64(pxW)) / cellAspectRatio))
+			if h < 1 {
+				h = 1
+			}
+			height = h
 		}
-		height = h
 	}
 
 	if height > termHeight {
@@ -204,7 +215,7 @@ func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stacke
 		go func(i int, p string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			imgs[i] = buildImagePrefix(p, width, height, termHeight)
+			imgs[i] = buildImagePrefix(p, width, height, termHeight, singleLine)
 		}(i, p)
 	}
 	wg.Wait()
