@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -404,14 +405,27 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	}
 
 	progressive := opts.i && scaleApplies
+	progressiveMulti := opts.i && multi
 	var imgPrefixes, imgSuffixes []string
 	var imgColWidth int
 	var progressivePlans []imagePlan
+	var hasImageMulti []bool
 	termHeight := getTerminalHeight()
-	if progressive {
+	switch {
+	case progressive:
 		progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags)
 		imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
-	} else {
+	case progressiveMulti:
+		imgColWidth = imgWidth + 1
+		imgColPad := strings.Repeat(" ", imgColWidth)
+		imgPrefixes = make([]string, len(fullPaths))
+		imgSuffixes = make([]string, len(fullPaths))
+		hasImageMulti = make([]bool, len(fullPaths))
+		for i, p := range fullPaths {
+			imgPrefixes[i] = imgColPad
+			hasImageMulti[i] = isFile(p) && imageExtensions[strings.ToLower(filepath.Ext(p))]
+		}
+	default:
 		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies)
 	}
 
@@ -431,28 +445,50 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	preambleCount := len(output) // header line, if any
 	hasTotalLine := opts.l && len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ")
 
-	if opts.l {
+	switch {
+	case progressiveMulti && multi && len(final) > 0:
+		hangWidth := 0
+		if opts.quote && anyQuoted {
+			hangWidth = 1
+		}
+		lines := renderMultiColumnLayout(layout, final, m.plainlen, effectiveStripe, opts.theme, opts.useTruecolor, hangWidth)
+		rowOfIdx, colOffsetOfIdx := computeImageCellOffsets(layout, effectiveStripe)
+		if preambleCount > 0 {
+			fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
+		}
+		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termHeight)
+	case opts.l:
 		output = append(output, renderLongFormat(names, plainL, final, imgPrefixes, opts, order)...)
-	} else if multi && len(final) > 0 {
+		if progressive {
+			if hasTotalLine {
+				preambleCount++
+			}
+			if preambleCount > 0 && preambleCount <= len(output) {
+				fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
+			}
+			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight)
+		} else if len(output) > 0 {
+			fmt.Print(strings.Join(output, "\n") + "\n")
+		}
+	case multi && len(final) > 0:
 		hangWidth := 0
 		if opts.quote && anyQuoted {
 			hangWidth = 1
 		}
 		output = append(output, renderMultiColumnLayout(layout, final, m.plainlen, effectiveStripe, opts.theme, opts.useTruecolor, hangWidth)...)
-	} else {
+		if len(output) > 0 {
+			fmt.Print(strings.Join(output, "\n") + "\n")
+		}
+	default:
 		output = append(output, final...)
-	}
-
-	if progressive {
-		if hasTotalLine {
-			preambleCount++
+		if progressive {
+			if preambleCount > 0 && preambleCount <= len(output) {
+				fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
+			}
+			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight)
+		} else if len(output) > 0 {
+			fmt.Print(strings.Join(output, "\n") + "\n")
 		}
-		if preambleCount > 0 && preambleCount <= len(output) {
-			fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
-		}
-		printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight)
-	} else if len(output) > 0 {
-		fmt.Print(strings.Join(output, "\n") + "\n")
 	}
 
 	if pagerQuit {

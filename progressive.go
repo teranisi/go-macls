@@ -267,3 +267,109 @@ func waitForContinue() bool {
 		}
 	}
 }
+
+// renderProgressiveMultiImages is renderProgressiveImages()'s multi-column
+// counterpart. Unlike -1/-l, several entries there can share one rendered
+// line, so a deferred draw needs a horizontal jump (colOffsetOfIdx, see
+// computeImageCellOffsets()) as well as the vertical one -- and since a
+// thumbnail is already forced to exactly 1 row in multi-column output (see
+// buildImagePrefix()'s allowAspectHeight), there's no stacked/multi-row
+// case to account for here. rowOfIdx and colOffsetOfIdx are page-relative:
+// row 0 is the first line printed for the page currently being drawn into,
+// and totalLines is how many lines that page holds.
+func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, totalLines, termHeight int) {
+	var order []int
+	for i, has := range hasImage {
+		if has {
+			order = append(order, i)
+		}
+	}
+	if len(order) == 0 {
+		return
+	}
+	sort.SliceStable(order, func(a, b int) bool { return rowOfIdx[order[a]] > rowOfIdx[order[b]] })
+
+	fmt.Print("\033[?25l")       // DECTCEM off: hide cursor
+	defer fmt.Print("\033[?25h") // DECTCEM on: show cursor again
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, imagePrefixConcurrency)
+	for _, i := range order {
+		rowsUp := totalLines - rowOfIdx[i]
+		if rowsUp >= termHeight {
+			// Already scrolled off; see renderProgressiveImages().
+			continue
+		}
+		colRight := colOffsetOfIdx[i]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i, rowsUp, colRight int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			img := buildImagePrefix(fullPaths[i], imgWidth, 1, termHeight, false)
+			if img == "" {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			fmt.Print("\0337") // DECSC: save cursor position
+			if rowsUp > 0 {
+				fmt.Printf("\033[%dA", rowsUp)
+			}
+			fmt.Print("\r")
+			if colRight > 0 {
+				fmt.Printf("\033[%dC", colRight)
+			}
+			fmt.Print(img)
+			fmt.Print("\0338") // DECRC: restore cursor position
+		}(i, rowsUp, colRight)
+	}
+	wg.Wait()
+}
+
+// printPaginatedMulti is printPaginated()'s multi-column counterpart:
+// pages are grouped by rendered LINE (a line can hold many entries' worth
+// of columns) rather than by per-entry row count, and each entry's
+// thumbnail is placed via renderProgressiveMultiImages() at its own
+// (row, column) cell within the page rather than always column 0.
+func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termHeight int) {
+	n := len(lines)
+	if n == 0 {
+		return
+	}
+	pageCapacity := termHeight - pagerPromptRows
+	if pageCapacity < 1 {
+		pageCapacity = 1
+	}
+	canPrompt := term.IsTerminal(int(os.Stdin.Fd()))
+
+	start := 0
+	for start < n {
+		end := minInt(start+pageCapacity, n)
+		fmt.Print(strings.Join(lines[start:end], "\n") + "\n")
+
+		var pFullPaths []string
+		var pHasImage []bool
+		var pRowOfIdx []int
+		var pColOffset []int
+		for i := range fullPaths {
+			if !hasImage[i] || rowOfIdx[i] < start || rowOfIdx[i] >= end {
+				continue
+			}
+			pFullPaths = append(pFullPaths, fullPaths[i])
+			pHasImage = append(pHasImage, true)
+			pRowOfIdx = append(pRowOfIdx, rowOfIdx[i]-start)
+			pColOffset = append(pColOffset, colOffsetOfIdx[i])
+		}
+		renderProgressiveMultiImages(pFullPaths, pHasImage, pRowOfIdx, pColOffset, imgWidth, end-start, termHeight)
+
+		start = end
+		if start < n && canPrompt {
+			if !waitForContinue() {
+				pagerQuit = true
+				return
+			}
+		}
+	}
+}

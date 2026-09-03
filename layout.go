@@ -412,6 +412,66 @@ func renderMultiColumnLayout(layout columnLayout, final []string, plainlen []int
 	return lines
 }
 
+// computeImageCellOffsets returns, for each entry, which rendered line
+// (0-indexed, matching renderMultiColumnLayout()'s returned lines) it
+// falls on and the cell offset within that line where its own block --
+// and so its img_prefix, always the very first thing in that block --
+// begins. Used to progressively render -I thumbnails in multi-column
+// output: knowing exactly where each entry's reserved image slot sits
+// lets a deferred draw jump the cursor there precisely, without needing
+// the rendered text itself.
+//
+// Mirrors renderMultiColumnLayout()'s own row-walking exactly (including
+// the classic/compact split), since an offset is only meaningful if it
+// agrees with what was actually printed.
+func computeImageCellOffsets(layout columnLayout, stripe bool) (rowOfIdx, colOffsetOfIdx []int) {
+	switch layout.mode {
+	case "empty":
+		return nil, nil
+	case "single":
+		return []int{0}, []int{0}
+	case "classic":
+		n := len(layout.colOfIdx)
+		rowOfIdx = make([]int, n)
+		colOffsetOfIdx = make([]int, n)
+		for idx := 0; idx < n; idx++ {
+			rowOfIdx[idx] = idx % layout.rows
+			colOffsetOfIdx[idx] = layout.colOfIdx[idx] * layout.colwidth
+		}
+		return rowOfIdx, colOffsetOfIdx
+	}
+
+	// compact
+	stripeActive := stripe
+	rows, grid, occupied, baseColwidth := layout.rows, layout.grid, layout.occupied, layout.baseColwidth
+	colHasContent := make([]bool, len(grid))
+	for c, col := range grid {
+		for _, v := range col {
+			if v >= 0 {
+				colHasContent[c] = true
+				break
+			}
+		}
+	}
+	n := len(layout.colOfIdx)
+	rowOfIdx = make([]int, n)
+	colOffsetOfIdx = make([]int, n)
+	for r := 0; r < rows; r++ {
+		offset := 0
+		for c, col := range grid {
+			v := col[r]
+			if v >= 0 {
+				rowOfIdx[v] = r
+				colOffsetOfIdx[v] = offset
+				offset += occupied[v]
+			} else if v == noneCell && stripeActive && colHasContent[c] {
+				offset += baseColwidth
+			}
+		}
+	}
+	return rowOfIdx, colOffsetOfIdx
+}
+
 func repeatSpace(n int) string {
 	if n <= 0 {
 		return ""
