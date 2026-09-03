@@ -280,6 +280,9 @@ func maxInt(a, b int) int {
 // mode is "dir" (list the contents of a single directory) or "files"
 // (list the explicitly given files/directories themselves).
 func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
+	if pagerQuit {
+		return
+	}
 	var output []string
 	joinIsDir := mode == "dir"
 	var targetDir string
@@ -400,7 +403,17 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		}
 	}
 
-	imgPrefixes, imgSuffixes, imgColWidth := buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies)
+	progressive := opts.i && scaleApplies
+	var imgPrefixes, imgSuffixes []string
+	var imgColWidth int
+	var progressivePlans []imagePlan
+	termHeight := getTerminalHeight()
+	if progressive {
+		progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags)
+		imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
+	} else {
+		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies)
+	}
 
 	m := buildEntries(names, fullPaths, sanitizedNames, needsQuote, ansiCNeeded, anyQuoted, opts, imgColWidth)
 
@@ -415,6 +428,9 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 
 	final := buildFinalEntries(names, fullPaths, m, imgPrefixes, imgSuffixes, mtimes, now, isTty, opts, colOfIdx)
 
+	preambleCount := len(output) // header line, if any
+	hasTotalLine := opts.l && len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ")
+
 	if opts.l {
 		output = append(output, renderLongFormat(names, plainL, final, imgPrefixes, opts, order)...)
 	} else if multi && len(final) > 0 {
@@ -427,8 +443,20 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		output = append(output, final...)
 	}
 
-	if len(output) > 0 {
+	if progressive {
+		if hasTotalLine {
+			preambleCount++
+		}
+		if preambleCount > 0 && preambleCount <= len(output) {
+			fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
+		}
+		printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight)
+	} else if len(output) > 0 {
 		fmt.Print(strings.Join(output, "\n") + "\n")
+	}
+
+	if pagerQuit {
+		return
 	}
 
 	if joinIsDir && opts.r && !opts.d {
@@ -441,6 +469,9 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 			}
 			fmt.Println()
 			listTarget("dir", true, []string{fullPaths[i]}, opts)
+			if pagerQuit {
+				return
+			}
 		}
 	}
 }
