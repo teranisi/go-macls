@@ -26,9 +26,32 @@ implements the same CLI surface.
   byte-wise sort rather than `locale.strxfrm()`-based collation, since Go's
   standard library has no locale-aware string collation.
 - Everything else — every flag, every color rule, the compact column
-  layout algorithm, `--quote`/ANSI-C quoting, `-I` thumbnails, the
-  unsupported-option fallback to real `ls` — is a direct, behavior-for-
-  behavior port.
+  layout algorithm, `--quote`/ANSI-C quoting, the unsupported-option
+  fallback to real `ls` — is a direct, behavior-for-behavior port.
+- **`-I` thumbnails render progressively, with pagination.** The Python
+  original reads and base64-encodes every thumbnail before printing
+  anything, so a directory with many (or large) images blocks the whole
+  listing until every image is ready. This port instead prints the text
+  listing immediately — names, `-l`'s permissions/dates, etc. — with each
+  entry's thumbnail filled in afterward as it finishes loading,
+  concurrently, via cursor positioning. This applies both to `-1`/`-l`
+  (one entry per line) and to multi-column output.
+
+  If the listing doesn't fit on one screen, output pauses after each
+  screenful with a `more(1)`-style prompt:
+
+  ```
+  -- more (space to continue, q to quit) --
+  ```
+
+  Press space to continue to the next page, or `q` (also Ctrl-C or Esc)
+  to stop early. This exists because a thumbnail can only be drawn into a
+  row that's still on screen — once a row scrolls into the terminal's
+  scrollback there's no way to draw into it — so pagination is what
+  guarantees every thumbnail you scroll back to was actually drawn.
+  Pagination only kicks in when standard input is a terminal; otherwise
+  (e.g. output piped to a file) every page prints back-to-back with no
+  pause.
 
 ## Build
 
