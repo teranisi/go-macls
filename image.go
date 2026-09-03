@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var imageExtensions = map[string]bool{
@@ -127,8 +128,10 @@ func getImagePixelSize(data []byte, ext string) (w, h int, ok bool) {
 // buildImagePrefix returns the escape sequence that renders the image at
 // path as a thumbnail of `width` cells wide using iTerm2's inline image
 // protocol (OSC 1337). Returns "" if the file isn't an image or can't be
-// read.
-func buildImagePrefix(path string, width, height int) string {
+// read. termHeight is the terminal's height (see getTerminalHeight()),
+// passed in rather than queried here so a caller building many prefixes at
+// once (see buildImagePrefixes()) only pays for that syscall once.
+func buildImagePrefix(path string, width, height, termHeight int) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	if !imageExtensions[ext] {
 		return ""
@@ -146,8 +149,8 @@ func buildImagePrefix(path string, width, height int) string {
 		height = h
 	}
 
-	if termH := getTerminalHeight(); height > termH {
-		height = termH
+	if height > termHeight {
+		height = termHeight
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(data)
@@ -163,9 +166,20 @@ func buildImagePrefix(path string, width, height int) string {
 	return "\033]1337;File=" + params + ":" + encoded + "\a"
 }
 
+// imagePrefixConcurrency bounds how many thumbnails are read/encoded at
+// once (see buildImagePrefixes()): each one is an independent file read
+// plus base64 encode, dominated by I/O wait, so running them concurrently
+// cuts -I's wall-clock time roughly in proportion to this bound instead of
+// to the number of images in the listing. Bounded (rather than one
+// goroutine per entry) to avoid exhausting file descriptors/memory on a
+// directory with thousands of images.
+const imagePrefixConcurrency = 16
+
 // buildImagePrefixes builds a thumbnail prefix/suffix pair for each entry.
 // See _build_image_prefixes() in the Python original for the layout
-// rationale. Returns (prefixes, suffixes, colWidth).
+// rationale. Returns (prefixes, suffixes, colWidth). The per-entry
+// buildImagePrefix() work (reading and base64-encoding each image file) is
+// independent, so it runs concurrently across entries.
 func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stackedFlags []bool, singleLine bool) ([]string, []string, int) {
 	if !optI {
 		prefixes := make([]string, len(fullPaths))
@@ -176,11 +190,26 @@ func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stacke
 	imgColPad := strings.Repeat(" ", imgColWidth)
 	prefixes := make([]string, len(fullPaths))
 	suffixes := make([]string, len(fullPaths))
+
+	termHeight := getTerminalHeight()
+	imgs := make([]string, len(fullPaths))
+	sem := make(chan struct{}, imagePrefixConcurrency)
+	var wg sync.WaitGroup
 	for i, p := range fullPaths {
-		img := ""
-		if isFile(p) {
-			img = buildImagePrefix(p, width, height)
+		if !isFile(p) {
+			continue
 		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, p string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			imgs[i] = buildImagePrefix(p, width, height, termHeight)
+		}(i, p)
+	}
+	wg.Wait()
+
+	for i, img := range imgs {
 		if !singleLine {
 			if img != "" {
 				prefixes[i] = img + " "
