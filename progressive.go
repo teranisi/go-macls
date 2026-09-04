@@ -53,7 +53,7 @@ func (p imagePlan) rows() int {
 // dimensions (see peekImagePixelSize()) -- fast compared to reading and
 // base64-encoding the whole file, which renderProgressiveImages() defers
 // until after the text listing has already been printed.
-func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight int, stackedFlags []bool) []imagePlan {
+func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight int, stackedFlags []bool, ql qlExtensions) []imagePlan {
 	plans := make([]imagePlan, len(fullPaths))
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	var wg sync.WaitGroup
@@ -62,7 +62,7 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(p))
-		if !imageExtensions[ext] {
+		if !imageExtensions[ext] && !isQLCandidate(p, ext, ql) {
 			continue
 		}
 		stacked := stackedFlags != nil && stackedFlags[i]
@@ -121,7 +121,7 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 // without this, each entry's own save/jump/draw/restore is visibly
 // distracting -- the cursor appears to hop around the screen as thumbnails
 // land -- even though the final result is correct either way.
-func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, termHeight int) {
+func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, termHeight int, ql qlExtensions) {
 	starts := make([]int, len(plans))
 	totalRows := 0
 	for i, p := range plans {
@@ -161,7 +161,7 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 		go func(i, rowsUp int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			img := buildImagePrefix(fullPaths[i], imgWidth, plans[i].height, termHeight, false)
+			img := buildImagePrefix(fullPaths[i], imgWidth, plans[i].height, termHeight, false, ql)
 			if img == "" {
 				return
 			}
@@ -198,7 +198,7 @@ const pagerPromptRows = 1
 // waitForContinue()); otherwise (input isn't interactive) it just keeps
 // going without pausing, matching how a non-interactive pager falls back
 // to a plain dump rather than hanging.
-func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, imgWidth, termHeight int) {
+func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, imgWidth, termHeight int, ql qlExtensions) {
 	n := minInt(len(entryLines), len(plans))
 	if n == 0 {
 		return
@@ -225,7 +225,7 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 		}
 
 		fmt.Print(strings.Join(entryLines[start:i], "\n") + "\n")
-		renderProgressiveImages(fullPaths[start:i], plans[start:i], imgWidth, termHeight)
+		renderProgressiveImages(fullPaths[start:i], plans[start:i], imgWidth, termHeight, ql)
 
 		if i < n && canPrompt {
 			if !waitForContinue() {
@@ -277,7 +277,7 @@ func waitForContinue() bool {
 // case to account for here. rowOfIdx and colOffsetOfIdx are page-relative:
 // row 0 is the first line printed for the page currently being drawn into,
 // and totalLines is how many lines that page holds.
-func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, totalLines, termHeight int) {
+func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, totalLines, termHeight int, ql qlExtensions) {
 	var order []int
 	for i, has := range hasImage {
 		if has {
@@ -307,7 +307,7 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 		go func(i, rowsUp, colRight int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			img := buildImagePrefix(fullPaths[i], imgWidth, 1, termHeight, false)
+			img := buildImagePrefix(fullPaths[i], imgWidth, 1, termHeight, false, ql)
 			if img == "" {
 				return
 			}
@@ -333,7 +333,7 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 // of columns) rather than by per-entry row count, and each entry's
 // thumbnail is placed via renderProgressiveMultiImages() at its own
 // (row, column) cell within the page rather than always column 0.
-func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termHeight int) {
+func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termHeight int, ql qlExtensions) {
 	n := len(lines)
 	if n == 0 {
 		return
@@ -362,7 +362,7 @@ func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfI
 			pRowOfIdx = append(pRowOfIdx, rowOfIdx[i]-start)
 			pColOffset = append(pColOffset, colOffsetOfIdx[i])
 		}
-		renderProgressiveMultiImages(pFullPaths, pHasImage, pRowOfIdx, pColOffset, imgWidth, end-start, termHeight)
+		renderProgressiveMultiImages(pFullPaths, pHasImage, pRowOfIdx, pColOffset, imgWidth, end-start, termHeight, ql)
 
 		start = end
 		if start < n && canPrompt {

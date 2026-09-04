@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -411,9 +410,10 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	var progressivePlans []imagePlan
 	var hasImageMulti []bool
 	termHeight := getTerminalHeight()
+	ql := resolveQLExtensions(opts)
 	switch {
 	case progressive:
-		progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags)
+		progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags, ql)
 		imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
 	case progressiveMulti:
 		imgColWidth = imgWidth + 1
@@ -423,10 +423,10 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		hasImageMulti = make([]bool, len(fullPaths))
 		for i, p := range fullPaths {
 			imgPrefixes[i] = imgColPad
-			hasImageMulti[i] = isFile(p) && imageExtensions[strings.ToLower(filepath.Ext(p))]
+			hasImageMulti[i] = isFile(p) && hasThumbnailCandidate(p, ql)
 		}
 	default:
-		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies)
+		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies, ql)
 	}
 
 	m := buildEntries(names, fullPaths, sanitizedNames, needsQuote, ansiCNeeded, anyQuoted, opts, imgColWidth)
@@ -456,7 +456,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		if preambleCount > 0 {
 			fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
 		}
-		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termHeight)
+		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termHeight, ql)
 	case opts.l:
 		output = append(output, renderLongFormat(names, plainL, final, imgPrefixes, opts, order)...)
 		if progressive {
@@ -466,7 +466,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 			if preambleCount > 0 && preambleCount <= len(output) {
 				fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
 			}
-			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight)
+			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight, ql)
 		} else if len(output) > 0 {
 			fmt.Print(strings.Join(output, "\n") + "\n")
 		}
@@ -485,7 +485,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 			if preambleCount > 0 && preambleCount <= len(output) {
 				fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
 			}
-			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight)
+			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight, ql)
 		} else if len(output) > 0 {
 			fmt.Print(strings.Join(output, "\n") + "\n")
 		}

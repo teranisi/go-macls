@@ -49,6 +49,16 @@ implements the same CLI surface.
   back to embedding the file unchanged, matching the original's own
   fallback, if `sips` isn't on `PATH` (e.g. not running on macOS) or the
   conversion fails for any reason.
+- **Quick Look (`--ql-ext`) thumbnails come back from `qlmanage` as PNG,
+  not re-encoded to JPEG.** The Python original renders a Word/Excel/
+  PowerPoint preview via `qlmanage -t`, then always re-encodes it through
+  its own `sips`-based shrink step (JPEG output). This port already has a
+  native Go PNG/JPEG/GIF downscaling pipeline it reuses for every other
+  oversized thumbnail (see the HEIC entry above), so it leaves `qlmanage`'s
+  own PNG output as-is (further downscaled in Go if still larger than the
+  target cell size) instead of adding a second shell-out just to change
+  format — no user-visible difference, since both end up sized the same
+  and iTerm2 renders either format identically.
 - **`--paging`, an extra option with no equivalent in the Python
   original.** The Python original has since gained its own default
   streaming behavior for `-1`/`-l`: each entry's line prints as soon as
@@ -107,6 +117,7 @@ alias ls='macls -BF --stripe --suffix-color=type --fg-mode=date --tag=bg --quote
 ./macls
 ./macls -la ~/Desktop
 ./macls -I -1 --scale=2 ~/Pictures
+./macls -Il2 --ql-ext=md,rtf ~/Documents
 ./macls --stripe --tag=str
 ```
 

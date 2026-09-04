@@ -30,6 +30,8 @@ type Options struct {
 	fgMode      string
 	baseFg      *rgb
 	scale       int
+	qlExtMode   string   // "default", "off", "all", "list" -- see --ql-ext
+	qlExtExtra  []string // --ql-ext=list form's extensions, each ".ext" lowercase
 
 	useColor     bool
 	useTruecolor bool
@@ -45,6 +47,7 @@ func newOptions() *Options {
 		suffixColor: "off",
 		fgMode:      "date",
 		scale:       1,
+		qlExtMode:   "default",
 	}
 }
 
@@ -73,7 +76,7 @@ var maclsOnlyLongOpts = func() []string {
 	for _, m := range modeOptions {
 		opts = append(opts, m.name)
 	}
-	return append(opts, "--quote", "--group-directories-first", "--stripe", "--base-fg", "--scale", "--paging")
+	return append(opts, "--quote", "--group-directories-first", "--stripe", "--base-fg", "--scale", "--paging", "--ql-ext")
 }()
 
 func stripMaclsOnlyOptions(argv []string) []string {
@@ -101,6 +104,12 @@ func stripMaclsOnlyOptions(argv []string) []string {
 			}
 		}
 		if matched {
+			continue
+		}
+		if arg != "-1" && len(arg) > 1 && isAllDigits(arg[1:]) {
+			// -N, parseOptions's own shorthand for --scale=N -- real ls(1)
+			// has no such option, so this needs stripping here too, the
+			// same as maclsOnlyLongOpts' long options.
 			continue
 		}
 		result = append(result, arg)
@@ -181,6 +190,62 @@ func parsePositiveInt(value string) (int, bool) {
 
 func dieInvalidScale(value string) {
 	fmt.Fprintf(os.Stderr, "%s: invalid value '%s' for --scale (must be a positive integer, e.g. 2)\n", prog, value)
+	os.Exit(2)
+}
+
+// isAllDigits reports whether s is non-empty and every rune in it is an
+// ASCII digit.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseQLExt parses --ql-ext's value into (mode, extra):
+// "off" -> ("off", nil): disables -I's Quick Look thumbnails (see
+// defaultQLExtensions) entirely, leaving imageExtensions files unaffected.
+// "all" -> ("all", nil): every extension not already in imageExtensions
+// becomes a Quick Look candidate, not just defaultQLExtensions' own curated
+// list.
+// Anything else -> ("list", extra), where extra is the comma-separated
+// extensions in value, each normalized to lowercase with a leading dot
+// (e.g. "foo,BAR" -> [".foo", ".bar"]), added on top of
+// defaultQLExtensions rather than replacing them.
+// ok is false if value is empty or contains an empty entry (e.g. "foo,,bar"
+// or a trailing/leading comma).
+func parseQLExt(value string) (mode string, extra []string, ok bool) {
+	if value == "off" {
+		return "off", nil, true
+	}
+	if value == "all" {
+		return "all", nil, true
+	}
+	if value == "" {
+		return "", nil, false
+	}
+	parts := strings.Split(value, ",")
+	extra = make([]string, len(parts))
+	for i, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			return "", nil, false
+		}
+		if !strings.HasPrefix(p, ".") {
+			p = "." + p
+		}
+		extra[i] = p
+	}
+	return "list", extra, true
+}
+
+func dieInvalidQLExt(value string) {
+	fmt.Fprintf(os.Stderr, "%s: invalid value '%s' for --ql-ext (must be \"off\", \"all\", or a comma-separated list of extensions, e.g. foo,bar)\n", prog, value)
 	os.Exit(2)
 }
 
@@ -276,6 +341,32 @@ func parseOptions(argv []string) (*Options, []string) {
 			i++
 			continue
 		}
+		if arg == "--ql-ext" || strings.HasPrefix(arg, "--ql-ext=") {
+			value := valueOf(arg)
+			mode, extra, ok := parseQLExt(value)
+			if !ok {
+				dieInvalidQLExt(value)
+			}
+			opts.qlExtMode = mode
+			opts.qlExtExtra = extra
+			i++
+			continue
+		}
+		if arg != "-1" && len(arg) > 1 && isAllDigits(arg[1:]) {
+			// -N shorthand for --scale=N (see --scale above), for any N
+			// other than 1: "-1" itself already means single-column output
+			// (opts.one, in the per-character loop below) and keeps that
+			// meaning -- there'd be nothing for "-1" as a scale shortcut to
+			// do anyway, since --scale=1 is already the unscaled base size.
+			value := arg[1:]
+			n, ok := parsePositiveInt(value)
+			if !ok {
+				dieInvalidScale(value)
+			}
+			opts.scale = n
+			i++
+			continue
+		}
 		if arg == "--" {
 			stopOptions = true
 			i++
@@ -286,7 +377,36 @@ func parseOptions(argv []string) (*Options, []string) {
 			i++
 			continue
 		}
-		for _, ch := range arg[1:] {
+		chars := arg[1:]
+		j := 0
+		for j < len(chars) {
+			ch := chars[j]
+			if ch >= '0' && ch <= '9' {
+				// -N shorthand for --scale=N (see --scale above), combined
+				// with other short flags in any order/position -- e.g.
+				// "-Il2" (-I -l --scale=2) and "-2I" (--scale=2 -I) both
+				// work, each consuming the maximal run of digits starting
+				// here as N before resuming normal flag-by-flag scanning
+				// right after it. A run that's exactly "1" is exempted
+				// (falls through to the 'l' == '1' case below) -- that's
+				// -1's own existing single-column meaning, not worth
+				// shadowing for --scale=1, which is --scale's own default
+				// anyway.
+				k := j
+				for k < len(chars) && chars[k] >= '0' && chars[k] <= '9' {
+					k++
+				}
+				run := chars[j:k]
+				if run != "1" {
+					n, ok := parsePositiveInt(run)
+					if !ok {
+						dieInvalidScale(run)
+					}
+					opts.scale = n
+					j = k
+					continue
+				}
+			}
 			switch ch {
 			case 'a':
 				opts.a = true
@@ -329,6 +449,7 @@ func parseOptions(argv []string) (*Options, []string) {
 				fullArgv := append(append([]string{}, argvFb...), stripMaclsOnlyOptions(argv)...)
 				execFallback(fullArgv, envFb)
 			}
+			j++
 		}
 		i++
 	}
@@ -386,7 +507,7 @@ func execFallback(argv []string, env []string) {
 }
 
 func printHelp() {
-	fmt.Printf(`Usage: %s [-a] [-A] [-l] [-h] [-1] [-C] [-F] [-I] [--scale=n] [--paging] [-t] [-S] [-X] [-r] [-d] [-R] [-B] [--color=when] [--theme=mode] [--tag-colors=mode] [--columns=mode] [--tag=mode] [--stripe] [--suffix-color=mode] [--fg-mode=mode] [--base-fg=RRGGBB] [--quote] [--group-directories-first] [--version] [path...]
+	fmt.Printf(`Usage: %s [-a] [-A] [-l] [-h] [-1] [-C] [-F] [-I] [--scale=n | -n] [--ql-ext=spec] [--paging] [-t] [-S] [-X] [-r] [-d] [-R] [-B] [--color=when] [--theme=mode] [--tag-colors=mode] [--columns=mode] [--tag=mode] [--stripe] [--suffix-color=mode] [--fg-mode=mode] [--base-fg=RRGGBB] [--quote] [--group-directories-first] [--version] [path...]
 
 Options:
   -a        Show all files, including . and ..
@@ -404,7 +525,30 @@ Options:
   --scale=n Multiply the -I thumbnail's width and height by n. Has an
             effect only in -1/-l (the only contexts -I itself is ever
             active in, since it's disabled outright on non-tty output).
-            Omitting n is the same as 1. No effect without -I.
+            Omitting n is the same as 1. No effect without -I. -n (n a
+            positive integer other than 1) is shorthand for --scale=n --
+            e.g. -2 is the same as --scale=2, and it combines with other
+            short flags in any position (-Il2, -2Il, -I2l all mean the
+            same thing). -1 itself keeps its own existing meaning
+            (single-column output) rather than becoming --scale=1, which
+            --scale's own default already is.
+  --ql-ext=spec
+            Adjusts which extensions -I tries a Quick Look preview for
+            (Word/Excel/PowerPoint documents by default) beyond image
+            files, which are unaffected by this option either way. spec
+            is one of:
+              off        Disables Quick Look thumbnails entirely.
+              all        Every extension not already treated as an image
+                         file becomes a Quick Look candidate, not just
+                         the curated Office default -- can be noticeably
+                         slower over a directory with many non-image
+                         files.
+              ext,ext,...
+                         A comma-separated list of extensions (with or
+                         without a leading dot, e.g. "md,rtf") added on
+                         top of the Office default, not replacing it.
+            Has no effect without -I. There's no bare "--ql-ext" form
+            (unlike --scale/--tag/etc.) -- a value is always required.
   --paging  Print the text listing immediately and fill in -I thumbnails
             afterward as they finish loading, pausing with a
             more(1)-style "-- more --" prompt (space to continue, q to

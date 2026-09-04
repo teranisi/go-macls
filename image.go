@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"image"
@@ -16,12 +17,103 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var imageExtensions = map[string]bool{
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".bmp": true,
 	".tiff": true, ".tif": true, ".webp": true, ".heic": true, ".heif": true,
 	".pdf": true,
+}
+
+// defaultQLExtensions are the extensions -I treats as Quick Look thumbnail
+// candidates (see qlExtensions, --ql-ext) beyond imageExtensions' own image
+// files, unless --ql-ext overrides them. Word/Excel/PowerPoint's binary and
+// OOXML formats: real Quick Look generators for these ship with macOS
+// itself (Preview.app etc.), no Office installation needed. Quick Look
+// itself isn't limited to Office documents, so any other extension with a
+// real (non-generic-icon) Quick Look generator is a candidate to add here
+// later.
+var defaultQLExtensions = map[string]bool{
+	".docx": true, ".xlsx": true, ".pptx": true,
+	".doc": true, ".xls": true, ".ppt": true,
+}
+
+// qlExtensions selects, beyond imageExtensions, which extensions
+// buildImagePrefix() tries a qlmanage(1) Quick Look preview for -- see
+// --ql-ext/resolveQLExtensions(). all is the --ql-ext=all sentinel ("any
+// extension not already in imageExtensions" is a candidate); otherwise
+// membership in exts decides (exts is empty, matching no extension, for
+// --ql-ext=off).
+type qlExtensions struct {
+	all  bool
+	exts map[string]bool
+}
+
+func (q qlExtensions) isCandidate(ext string) bool {
+	if q.all {
+		return true
+	}
+	return q.exts[ext]
+}
+
+// resolveQLExtensions turns opts.qlExtMode/opts.qlExtExtra (see --ql-ext)
+// into the single qlExtensions value buildImagePrefix() and friends
+// actually take.
+func resolveQLExtensions(opts *Options) qlExtensions {
+	switch opts.qlExtMode {
+	case "off":
+		return qlExtensions{}
+	case "all":
+		return qlExtensions{all: true}
+	case "list":
+		exts := make(map[string]bool, len(defaultQLExtensions)+len(opts.qlExtExtra))
+		for e := range defaultQLExtensions {
+			exts[e] = true
+		}
+		for _, e := range opts.qlExtExtra {
+			exts[e] = true
+		}
+		return qlExtensions{exts: exts}
+	default:
+		return qlExtensions{exts: defaultQLExtensions}
+	}
+}
+
+// isQLCandidate reports whether path (with lowercased extension ext) is a
+// Quick Look thumbnail candidate under ql -- i.e. build_image_prefix()'s
+// is_ql in the Python original. A "~$name.ext"-style lock file Word/Excel/
+// PowerPoint leaves next to a document while it's open elsewhere isn't
+// actually a valid document (just a small owner-info stub with the same
+// extension) -- qlmanage has been observed to hang well past its own
+// timeout trying to preview one, so these are excluded entirely rather than
+// left to fail slowly. A 0-byte file is excluded the same way: there's no
+// content for Quick Look to render, and an empty file has also been
+// observed to make qlmanage hang rather than fail fast. An extension-less
+// file is always excluded too -- ql.all (--ql-ext=all) would otherwise
+// treat having no extension as "not in imageExtensions" and so a candidate.
+func isQLCandidate(path, ext string, ql qlExtensions) bool {
+	if ext == "" || imageExtensions[ext] {
+		return false
+	}
+	if strings.HasPrefix(filepath.Base(path), "~$") {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= 0 {
+		return false
+	}
+	return ql.isCandidate(ext)
+}
+
+// hasThumbnailCandidate reports whether path is an -I thumbnail candidate
+// at all -- either a real image (imageExtensions) or a Quick Look candidate
+// under ql -- without doing the actual (much more expensive) thumbnail
+// work. Used by the progressive-rendering paths (see progressive.go) to
+// decide, cheaply, which entries need a reserved thumbnail slot at all.
+func hasThumbnailCandidate(path string, ql qlExtensions) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return imageExtensions[ext] || isQLCandidate(path, ext, ql)
 }
 
 // Base thumbnail size (--scale=1): a height of 1 cell, matching iTerm2's
@@ -316,16 +408,18 @@ func boxDownsample(src image.Image, newW, newH int) *image.RGBA {
 	return dst
 }
 
-// heicMaxDimSafetyFactor inflates convertHeicForThumbnail()'s resize
-// target (see its own doc comment) beyond a flat width*thumbnailPxPerCell,
-// to still cover a strongly portrait-oriented photo adequately: the target
-// is picked before this image's own aspect ratio is known (avoiding a
-// separate metadata-only sips call just to learn it up front), so this
-// errs generous rather than risk shortchanging the thumbnail's longer
-// dimension. 3x covers up to a 3:1 aspect ratio at full requested
-// resolution -- beyond typical even for a portrait phone photo -- while
-// still being a tiny fraction of a real photo's own resolution.
-const heicMaxDimSafetyFactor = 3
+// preAspectMaxDimSafetyFactor inflates convertHeicForThumbnail()'s and
+// qlmanageThumbnail()'s resize target (see their own doc comments) beyond a
+// flat width*thumbnailPxPerCell, to still cover a strongly portrait-
+// oriented source (a phone photo, an A4/letter document page) adequately:
+// the target is picked before the source's own aspect ratio is known
+// (avoiding a separate metadata-only sips/qlmanage call just to learn it up
+// front), so this errs generous rather than risk shortchanging the
+// thumbnail's longer dimension. 3x covers up to a 3:1 aspect ratio at full
+// requested resolution -- beyond typical even for a portrait phone photo or
+// document page -- while still being a tiny fraction of a real source's own
+// resolution.
+const preAspectMaxDimSafetyFactor = 3
 
 // convertHeicForThumbnail converts a HEIC/HEIF file to a PNG already
 // downscaled to fit within maxDim x maxDim, using macOS's built-in `sips`
@@ -376,6 +470,58 @@ func convertHeicForThumbnail(path string, maxDim int) ([]byte, bool) {
 	return data, true
 }
 
+// qlmanageTimeout bounds how long qlmanageThumbnail() waits for qlmanage(1)
+// before giving up and treating the thumbnail as failed. Kept short: some
+// files/extensions (confirmed with plain .out/.err log files, most likely
+// whenever Quick Look has no real generator for the content and falls
+// through to some slow default path) make qlmanage hang seemingly
+// indefinitely rather than fail fast, and a directory can easily contain
+// many such files -- especially under --ql-ext=all, which tries every
+// non-image extension. 1s is well above qlmanage's normal few-hundred-ms
+// case but short enough that a run of hangs doesn't stall a whole listing.
+const qlmanageTimeout = 1 * time.Second
+
+// qlmanageThumbnail renders path's first-page/sheet/slide preview via
+// macOS's qlmanage(1) (Quick Look's own command-line interface), scaled to
+// fit within maxPx on its longer side, and returns it as PNG data.
+// qlmanage only writes into a directory (-o), naming its output
+// "<original filename>.png" inside it, so this uses a dedicated temporary
+// directory per call.
+//
+// Returns ok=false on any failure -- qlmanage not on PATH (e.g. not running
+// on macOS), a non-zero exit, the timeout above, or the expected output
+// file missing/empty -- in which case the caller has no thumbnail for this
+// entry at all: unlike an image format buildImagePrefix() can't parse the
+// header of, there's no "embed the original file and hope the terminal can
+// decode it" fallback that makes sense for a document format an OSC 1337
+// client can't render directly.
+func qlmanageThumbnail(path string, maxPx int) ([]byte, bool) {
+	qlPath, err := exec.LookPath("qlmanage")
+	if err != nil {
+		return nil, false
+	}
+	tmpDir, err := os.MkdirTemp("", "macls-ql-*")
+	if err != nil {
+		return nil, false
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), qlmanageTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, qlPath, "-t", "-s", strconv.Itoa(maxPx), "-o", tmpDir, path)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+	outPath := filepath.Join(tmpDir, filepath.Base(path)+".png")
+	data, err := os.ReadFile(outPath)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
 // buildImagePrefix returns the escape sequence that renders the image at
 // path as a thumbnail of `width` cells wide using iTerm2's inline image
 // protocol (OSC 1337). Returns "" if the file isn't an image or can't be
@@ -391,20 +537,45 @@ func convertHeicForThumbnail(path string, maxDim int) ([]byte, bool) {
 // row would drag the cursor down mid-line and misplace everything printed
 // after it in that row -- including, for the entry the tall thumbnail
 // belongs to, its own name.
-func buildImagePrefix(path string, width, height, termHeight int, allowAspectHeight bool) string {
+//
+// ql (see --ql-ext) selects which non-image extensions are Quick Look
+// candidates, rendered via qlmanage(1) (see qlmanageThumbnail()) instead of
+// embedded directly -- an imageExtensions file is never treated as a Quick
+// Look candidate regardless of ql, even under --ql-ext=all or a --ql-ext
+// list that happens to include one of its extensions, since those already
+// have a strictly better dedicated path (their own real pixel data, not a
+// qlmanage-rendered preview).
+func buildImagePrefix(path string, width, height, termHeight int, allowAspectHeight bool, ql qlExtensions) string {
 	ext := strings.ToLower(filepath.Ext(path))
-	if !imageExtensions[ext] {
-		return ""
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	isImage := imageExtensions[ext]
+	isQL := !isImage && isQLCandidate(path, ext, ql)
+	if !isImage && !isQL {
 		return ""
 	}
 
-	if ext == ".heic" || ext == ".heif" {
-		heicMaxDim := width * thumbnailPxPerCell * heicMaxDimSafetyFactor
-		if converted, ok := convertHeicForThumbnail(path, heicMaxDim); ok {
-			data, ext = converted, ".png"
+	var data []byte
+	if isQL {
+		// No "embed the original file" fallback makes sense here (an OSC
+		// 1337 client can't render a .docx), so any qlmanage failure just
+		// means no thumbnail for this entry.
+		maxPx := width * thumbnailPxPerCell * preAspectMaxDimSafetyFactor
+		converted, ok := qlmanageThumbnail(path, maxPx)
+		if !ok {
+			return ""
+		}
+		data, ext = converted, ".png"
+	} else {
+		d, err := os.ReadFile(path)
+		if err != nil || len(d) == 0 {
+			return ""
+		}
+		data = d
+
+		if ext == ".heic" || ext == ".heif" {
+			heicMaxDim := width * thumbnailPxPerCell * preAspectMaxDimSafetyFactor
+			if converted, ok := convertHeicForThumbnail(path, heicMaxDim); ok {
+				data, ext = converted, ".png"
+			}
 		}
 	}
 
@@ -450,7 +621,7 @@ const imagePrefixConcurrency = 16
 // rationale. Returns (prefixes, suffixes, colWidth). The per-entry
 // buildImagePrefix() work (reading and base64-encoding each image file) is
 // independent, so it runs concurrently across entries.
-func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stackedFlags []bool, singleLine bool) ([]string, []string, int) {
+func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stackedFlags []bool, singleLine bool, ql qlExtensions) ([]string, []string, int) {
 	if !optI {
 		prefixes := make([]string, len(fullPaths))
 		suffixes := make([]string, len(fullPaths))
@@ -474,7 +645,7 @@ func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stacke
 		go func(i int, p string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			imgs[i] = buildImagePrefix(p, width, height, termHeight, singleLine)
+			imgs[i] = buildImagePrefix(p, width, height, termHeight, singleLine, ql)
 		}(i, p)
 	}
 	wg.Wait()
