@@ -28,27 +28,44 @@ implements the same CLI surface.
 - Everything else — every flag, every color rule, the compact column
   layout algorithm, `--quote`/ANSI-C quoting, the unsupported-option
   fallback to real `ls` — is a direct, behavior-for-behavior port.
-- **HEIC/HEIF `-I` thumbnails are decoded, not just embedded raw.** The
-  Python original (like every other format it can't parse the header of)
-  just embeds a HEIC/HEIF file's raw bytes and hopes the terminal can
-  decode it. There's no practical way to decode HEIC in pure Go (it's
+- **HEIC/HEIF `-I` thumbnails always go through `sips`, not just when the
+  file happens to be large.** Originally, the Python original (like every
+  format it can't parse the header of) just embedded a HEIC/HEIF file's
+  raw bytes and hoped the terminal could decode it; it has since gained
+  its own `sips`-based shrink step (for large images generally — any
+  format above a size threshold, always re-encoded as JPEG, HEIC
+  included) that independently arrived at the same fix for the same
+  "`-I` feels slow over a directory of large photos" problem this port
+  also ran into. This port takes a narrower, format-specific version of
+  that idea: there's no practical way to decode HEIC in pure Go (it's
   built on patent-encumbered HEVC/H.265 compression, unsupported by both
-  the standard library and `golang.org/x/image`), so this port instead
-  shells out to macOS's own `sips` command-line tool — the same approach
-  already used for `ls -l`'s own output — to convert it to PNG first, then
-  runs that through the same downscaling as a real PNG file (see below).
-  Falls back to embedding the file unchanged, matching the original
-  behavior, if `sips` isn't on `PATH` (e.g. not running on macOS) or the
+  the standard library and `golang.org/x/image`), so HEIC/HEIF
+  specifically is always converted via `sips` regardless of file size —
+  a small HEIC file has no header this port (or the original) can parse
+  at all, so skipping the conversion below some size threshold would
+  leave it embedded raw either way — re-encoded as PNG (matching the
+  rest of this port's own downscaling pipeline, which decodes PNG/JPEG/
+  GIF natively in Go rather than shelling out) rather than JPEG. Falls
+  back to embedding the file unchanged, matching the original's own
+  fallback, if `sips` isn't on `PATH` (e.g. not running on macOS) or the
   conversion fails for any reason.
 - **`--paging`, an extra option with no equivalent in the Python
-  original.** By default, `-I` behaves like the original: it waits for
-  every thumbnail to be read and (as of this port) downscaled before
-  printing anything, but the listing itself never pauses partway through.
-  `--paging` instead prints the text listing immediately — names, `-l`'s
-  permissions/dates, etc. — with each entry's thumbnail filled in
-  afterward as it finishes loading, concurrently, via cursor positioning.
-  This applies both to `-1`/`-l` (one entry per line) and to multi-column
-  output. No effect without `-I`.
+  original.** The Python original has since gained its own default
+  streaming behavior for `-1`/`-l`: each entry's line prints as soon as
+  its own thumbnail is ready, without waiting on the rest of the
+  directory, but always in order — an entry's own image is already part
+  of its line by the time that line prints, so it never needs to place
+  anything after the fact and never risks a thumbnail landing on an
+  entry that's already scrolled off. This port's default is still the
+  older, simpler behavior: read every thumbnail (and, as of this port,
+  downscale it) before printing anything, with the listing itself never
+  pausing partway through. `--paging` instead prints the entire text
+  listing immediately — names, `-l`'s permissions/dates, etc., not just
+  one entry at a time — with every entry's thumbnail filled in
+  afterward, concurrently and out of order, via cursor positioning. This
+  applies both to `-1`/`-l` (one entry per line) and to multi-column
+  output, which the original's own streaming doesn't cover either. No
+  effect without `-I`.
 
   If the listing doesn't fit on one screen, `--paging` output pauses
   after each screenful with a `more(1)`-style prompt:
