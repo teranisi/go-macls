@@ -74,24 +74,25 @@ implements the same CLI surface.
   one entry at a time — with every entry's thumbnail filled in
   afterward, concurrently and out of order, via cursor positioning. This
   applies both to `-1`/`-l` (one entry per line) and to multi-column
-  output, which the original's own streaming doesn't cover either. No
-  effect without `-I`.
+  output, which the original's own streaming doesn't cover either.
 
-  If the listing doesn't fit on one screen, `--paging` output pauses
-  after each screenful with a `more(1)`-style prompt:
+  `--paging` isn't only about `-I`, though: whenever the listing doesn't
+  fit on one screen, it pauses after each screenful with a `more(1)`-style
+  prompt, whether or not `-I` is active —
 
   ```
-  -- more (space to continue, q to quit) --
+  -- more (space to continue, return for one line, q to quit) --
   ```
 
-  Press space to continue to the next page, or `q` (also Ctrl-C or Esc)
-  to stop early. This exists because a thumbnail can only be drawn into a
-  row that's still on screen — once a row scrolls into the terminal's
-  scrollback there's no way to draw into it — so pagination is what
-  guarantees every thumbnail you scroll back to was actually drawn.
-  Pagination only kicks in when standard input is a terminal; otherwise
-  (e.g. output piped to a file) every page prints back-to-back with no
-  pause.
+  — space advances to the next full page, return advances just one more
+  line (holding it down steps through the listing one line at a time,
+  same as `more`/`less`), and `q` (also Ctrl-C or Esc) stops early. With
+  `-I`, this is also what guarantees every thumbnail you scroll back to
+  was actually drawn: a thumbnail can only be drawn into a row that's
+  still on screen, so a page never holds more rows than the terminal can
+  show at once. Pagination only kicks in when standard input is a
+  terminal; otherwise (e.g. output piped to a file) every page prints
+  back-to-back with no pause.
 
 ## Build
 

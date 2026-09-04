@@ -403,8 +403,13 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		}
 	}
 
-	progressive := opts.i && scaleApplies && opts.paging
-	progressiveMulti := opts.i && multi && opts.paging
+	// --paging's own pagination applies to any -1/-l or multi-column
+	// listing that doesn't fit on one screen, regardless of -I -- only the
+	// image-planning work within each branch below is still conditional on
+	// opts.i, matching the non-paging default case's own optI-gated
+	// buildImagePrefixes() below.
+	progressive := opts.paging && !multi
+	progressiveMulti := opts.paging && multi
 	var imgPrefixes, imgSuffixes []string
 	var imgColWidth int
 	var progressivePlans []imagePlan
@@ -413,17 +418,25 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	ql := resolveQLExtensions(opts)
 	switch {
 	case progressive:
-		progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags, ql)
-		imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
+		if opts.i {
+			progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags, ql)
+			imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
+		} else {
+			progressivePlans = make([]imagePlan, len(fullPaths))
+			imgPrefixes = make([]string, len(fullPaths))
+			imgSuffixes = make([]string, len(fullPaths))
+		}
 	case progressiveMulti:
-		imgColWidth = imgWidth + 1
-		imgColPad := strings.Repeat(" ", imgColWidth)
 		imgPrefixes = make([]string, len(fullPaths))
 		imgSuffixes = make([]string, len(fullPaths))
 		hasImageMulti = make([]bool, len(fullPaths))
-		for i, p := range fullPaths {
-			imgPrefixes[i] = imgColPad
-			hasImageMulti[i] = isFile(p) && hasThumbnailCandidate(p, ql)
+		if opts.i {
+			imgColWidth = imgWidth + 1
+			imgColPad := strings.Repeat(" ", imgColWidth)
+			for i, p := range fullPaths {
+				imgPrefixes[i] = imgColPad
+				hasImageMulti[i] = isFile(p) && hasThumbnailCandidate(p, ql)
+			}
 		}
 	default:
 		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies, ql)

@@ -191,13 +191,17 @@ const pagerPromptRows = 1
 // when its thumbnail is drawn (a page never holds more than a terminal
 // height's worth of rows), unlike a single unpaginated dump of the whole
 // listing, where entries past the first screenful scroll off before their
-// image ever gets drawn.
+// image ever gets drawn. plans may all have hasImage false (no -I), in
+// which case this is plain more(1)-style text pagination with no image
+// work at all.
 //
 // When there's more than one page and standard input is a terminal, it
 // pauses after each page but the last with a "-- more --" prompt (see
-// waitForContinue()); otherwise (input isn't interactive) it just keeps
-// going without pausing, matching how a non-interactive pager falls back
-// to a plain dump rather than hanging.
+// waitForContinue()): space advances a full page, return advances a single
+// entry (then prompts again, so holding return steps through the listing
+// one entry at a time); otherwise (input isn't interactive) it just keeps
+// going without pausing, matching how a non-interactive pager falls back to
+// a plain dump rather than hanging.
 func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, imgWidth, termHeight int, ql qlExtensions) {
 	n := minInt(len(entryLines), len(plans))
 	if n == 0 {
@@ -211,7 +215,13 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 	}
 	canPrompt := term.IsTerminal(int(os.Stdin.Fd()))
 
+	renderPage := func(start, end int) {
+		fmt.Print(strings.Join(entryLines[start:end], "\n") + "\n")
+		renderProgressiveImages(fullPaths[start:end], plans[start:end], imgWidth, termHeight, ql)
+	}
+
 	i := 0
+outer:
 	for i < n {
 		start := i
 		rows := 0
@@ -223,33 +233,49 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 			rows += r
 			i++
 		}
+		renderPage(start, i)
 
-		fmt.Print(strings.Join(entryLines[start:i], "\n") + "\n")
-		renderProgressiveImages(fullPaths[start:i], plans[start:i], imgWidth, termHeight, ql)
-
-		if i < n && canPrompt {
-			if !waitForContinue() {
+		for i < n && canPrompt {
+			switch waitForContinue() {
+			case pagerActionQuit:
 				pagerQuit = true
 				return
+			case pagerActionLine:
+				renderPage(i, i+1)
+				i++
+			default: // pagerActionPage
+				continue outer
 			}
 		}
 	}
 }
 
+// pagerAction is waitForContinue()'s result: which way the user asked the
+// pager to advance, or to stop entirely.
+type pagerAction int
+
+const (
+	pagerActionPage pagerAction = iota // space: a full page
+	pagerActionLine                    // return: a single line/entry
+	pagerActionQuit                    // q, Ctrl-C, Esc
+)
+
 // waitForContinue prints a "-- more --" prompt and blocks for a single
 // keypress on standard input, put into raw mode for the duration so the
-// key doesn't need Enter and isn't echoed. Space (or Enter) continues to
-// the next page; q, Ctrl-C, or Esc quits; anything else is ignored and it
-// keeps waiting, same as a traditional more(1)/less(1) prompt. Returns
-// false only for the quit case.
-func waitForContinue() bool {
-	fmt.Print("-- more (space to continue, q to quit) --")
+// key doesn't need Enter and isn't echoed. Space continues to the next full
+// page; return (or a newline) continues just one line/entry, same as
+// more(1)/less(1)'s own line-at-a-time key; q, Ctrl-C, or Esc quits;
+// anything else is ignored and it keeps waiting. A read error/EOF on
+// standard input is treated the same as space, so an unexpectedly closed
+// input can't hang the listing.
+func waitForContinue() pagerAction {
+	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
 	defer fmt.Print("\r\033[K") // erase the prompt before the next page
 
 	fd := int(os.Stdin.Fd())
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
-		return true
+		return pagerActionPage
 	}
 	defer term.Restore(fd, oldState)
 
@@ -257,13 +283,15 @@ func waitForContinue() bool {
 	for {
 		nRead, err := os.Stdin.Read(buf)
 		if err != nil || nRead == 0 {
-			return true
+			return pagerActionPage
 		}
 		switch buf[0] {
-		case ' ', '\r', '\n':
-			return true
+		case ' ':
+			return pagerActionPage
+		case '\r', '\n':
+			return pagerActionLine
 		case 'q', 'Q', 3 /* Ctrl-C */, 27 /* Esc */ :
-			return false
+			return pagerActionQuit
 		}
 	}
 }
@@ -344,9 +372,7 @@ func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfI
 	}
 	canPrompt := term.IsTerminal(int(os.Stdin.Fd()))
 
-	start := 0
-	for start < n {
-		end := minInt(start+pageCapacity, n)
+	renderPage := func(start, end int) {
 		fmt.Print(strings.Join(lines[start:end], "\n") + "\n")
 
 		var pFullPaths []string
@@ -363,12 +389,25 @@ func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfI
 			pColOffset = append(pColOffset, colOffsetOfIdx[i])
 		}
 		renderProgressiveMultiImages(pFullPaths, pHasImage, pRowOfIdx, pColOffset, imgWidth, end-start, termHeight, ql)
+	}
 
+	start := 0
+outer:
+	for start < n {
+		end := minInt(start+pageCapacity, n)
+		renderPage(start, end)
 		start = end
-		if start < n && canPrompt {
-			if !waitForContinue() {
+
+		for start < n && canPrompt {
+			switch waitForContinue() {
+			case pagerActionQuit:
 				pagerQuit = true
 				return
+			case pagerActionLine:
+				renderPage(start, start+1)
+				start++
+			default: // pagerActionPage
+				continue outer
 			}
 		}
 	}

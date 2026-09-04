@@ -549,13 +549,14 @@ Options:
                          top of the Office default, not replacing it.
             Has no effect without -I. There's no bare "--ql-ext" form
             (unlike --scale/--tag/etc.) -- a value is always required.
-  --paging  Print the text listing immediately and fill in -I thumbnails
-            afterward as they finish loading, pausing with a
-            more(1)-style "-- more --" prompt (space to continue, q to
-            quit) whenever the listing doesn't fit on one screen.
-            Without --paging (the default), -I waits for every
-            thumbnail to be ready before printing anything, but never
-            pauses partway through a long listing. No effect without -I.
+  --paging  Pause with a more(1)-style "-- more --" prompt (space for the
+            next page, return for one more line, q to quit) whenever the
+            listing doesn't fit on one screen -- with -I, thumbnails are
+            also filled in afterward as they finish loading, page by
+            page, instead of every thumbnail in the whole listing being
+            read before anything prints. Without --paging (the
+            default), the whole listing (and, with -I, every thumbnail)
+            prints without ever pausing partway through.
   -t        Sort by modification time, newest first
   -S        Sort by file size, largest first
   -X        Sort by extension
