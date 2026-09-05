@@ -435,7 +435,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 			imgColPad := strings.Repeat(" ", imgColWidth)
 			for i, p := range fullPaths {
 				imgPrefixes[i] = imgColPad
-				hasImageMulti[i] = isFile(p) && hasThumbnailCandidate(p, ql)
+				hasImageMulti[i] = isFileFollow(p) && hasThumbnailCandidate(p, ql)
 			}
 		}
 	default:

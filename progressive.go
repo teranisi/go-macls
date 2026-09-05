@@ -58,7 +58,7 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	var wg sync.WaitGroup
 	for i, p := range fullPaths {
-		if !isFile(p) {
+		if !isFileFollow(p) {
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(p))

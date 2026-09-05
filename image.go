@@ -637,7 +637,7 @@ func buildImagePrefixes(fullPaths []string, optI bool, width, height int, stacke
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	var wg sync.WaitGroup
 	for i, p := range fullPaths {
-		if !isFile(p) {
+		if !isFileFollow(p) {
 			continue
 		}
 		wg.Add(1)
