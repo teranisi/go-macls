@@ -140,8 +140,12 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 	}
 	sort.SliceStable(order, func(a, b int) bool { return starts[order[a]] > starts[order[b]] })
 
-	fmt.Print("\033[?25l")       // DECTCEM off: hide cursor
-	defer fmt.Print("\033[?25h") // DECTCEM on: show cursor again
+	fmt.Print("\033[?25l") // DECTCEM off: hide cursor
+	setCursorHidden(true)
+	defer func() {
+		fmt.Print("\033[?25h") // DECTCEM on: show cursor again
+		setCursorHidden(false)
+	}()
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -286,11 +290,11 @@ func waitForContinuePlain() pagerAction {
 	defer fmt.Print("\r\033[K") // erase the prompt before the next page
 
 	fd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(fd)
+	oldState, err := enterRawMode(fd)
 	if err != nil {
 		return pagerActionPage
 	}
-	defer term.Restore(fd, oldState)
+	defer exitRawMode(fd, oldState)
 
 	buf := make([]byte, 1)
 	for {
@@ -323,16 +327,20 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	defer fmt.Print("\r\033[K")
 
 	fd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(fd)
+	oldState, err := enterRawMode(fd)
 	if err != nil {
 		return pagerActionPage
 	}
-	defer term.Restore(fd, oldState)
+	defer exitRawMode(fd, oldState)
 
 	promptRow, haveRow := queryCursorRow(os.Stdin)
 
 	fmt.Print(mouseTrackingEnable)
-	defer fmt.Print(mouseTrackingDisable)
+	setMouseTrackingOn(true)
+	defer func() {
+		fmt.Print(mouseTrackingDisable)
+		setMouseTrackingOn(false)
+	}()
 
 	r := newEscReader(os.Stdin)
 	clicked := ""
@@ -388,8 +396,12 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 	}
 	sort.SliceStable(order, func(a, b int) bool { return rowOfIdx[order[a]] > rowOfIdx[order[b]] })
 
-	fmt.Print("\033[?25l")       // DECTCEM off: hide cursor
-	defer fmt.Print("\033[?25h") // DECTCEM on: show cursor again
+	fmt.Print("\033[?25l") // DECTCEM off: hide cursor
+	setCursorHidden(true)
+	defer func() {
+		fmt.Print("\033[?25h") // DECTCEM on: show cursor again
+		setCursorHidden(false)
+	}()
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup

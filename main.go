@@ -18,6 +18,8 @@ func sortDirArgs(dirArgs []string) []string {
 }
 
 func run() int {
+	installSignalCleanup()
+
 	argv := os.Args[1:]
 	opts, positional := parseOptions(argv)
 
@@ -32,6 +34,16 @@ func run() int {
 
 	if opts.theme == "auto" {
 		dark := detectDarkBackground()
+		if dark == nil {
+			// COLORFGBG is an iTerm2/rxvt-family convention that plenty of
+			// otherwise-capable terminals (Terminal.app included) simply
+			// don't set -- ask the terminal itself instead of assuming
+			// light, which would otherwise fade old files toward a dark
+			// foreground invisible against an actually-dark background.
+			if d, ok := queryBackgroundIsDark(); ok {
+				dark = &d
+			}
+		}
 		if dark != nil && *dark {
 			opts.theme = "dark"
 		} else {
