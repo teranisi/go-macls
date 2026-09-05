@@ -249,6 +249,7 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 	entryLines, plans, fullPaths = entryLines[:n], plans[:n], fullPaths[:n]
 
 	pageCapacity := termHeight - pagerPromptRows
+	debugLogPaging(termHeight, pageCapacity, entryLines, plans)
 	if pageCapacity < 1 {
 		pageCapacity = 1
 	}
