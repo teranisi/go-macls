@@ -536,9 +536,9 @@ Options:
   -C        Force multi-column output, even when standard output isn't
             a terminal
   -F        Append entry type indicators (/ @ * = |)
-  -I        Show image thumbnails using iTerm2's inline image protocol.
-            Ignored outside iTerm2, or when standard output isn't a
-            terminal.
+  -I        Show image thumbnails using iTerm2's inline image protocol
+            (also supported by WezTerm). Ignored outside iTerm2/WezTerm,
+            or when standard output isn't a terminal.
   --scale=n Multiply the -I thumbnail's width and height by n. Has an
             effect only in -1/-l (the only contexts -I itself is ever
             active in, since it's disabled outright on non-tty output).

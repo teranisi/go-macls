@@ -150,9 +150,28 @@ func buildColoredName(o colorNameOpts) (string, int) {
 
 // spliceColoredName replaces the trailing name in a line of ls -l output
 // with colored. Also handles the symlink "name -> target" form. Returns
-// line unchanged if neither matches. surroundSGR, if non-empty, wraps
-// everything OTHER than colored in that SGR code.
-func spliceColoredName(name, line, colored, surroundSGR string) string {
+// (result, matched): result is line unchanged if neither matches, with
+// matched false -- name wasn't found where expected, meaning line isn't
+// actually this entry's own ls -l data (e.g. names and plainL fell out of
+// step -- see renderLongFormat()'s own "matched") rather than name
+// containing some unanticipated shape spliceColoredName() itself failed to
+// handle. A caller that goes on to draw something else (like -I's
+// thumbnail) positioned relative to an assumption that line is this
+// entry's own data should treat matched false as a reason not to. surroundSGR,
+// if non-empty, wraps everything OTHER than colored in that SGR code.
+//
+// isTty/optQuote: unlike name (already sanitized/quoted well before this is
+// ever called -- see computeQuoting()), a symlink's target text comes
+// straight from line, unprocessed, since only renderLongFormat()'s caller
+// ever sees it. A raw control character there (e.g. a symlink pointing at
+// a name containing a literal newline) would otherwise reach the terminal
+// unsanitized, corrupting the display the same way an entry's own
+// unsanitized name would -- so it gets the same treatment here:
+// sanitizeDisplayName()'s '?' replacement when isTty, or, when optQuote is
+// also set and the target actually needs it, ansiCQuote()'s $'...' instead
+// (matching --quote's own treatment of a control-character name -- see
+// computeQuoting()).
+func spliceColoredName(name, line, colored, surroundSGR string, isTty, optQuote bool) (string, bool) {
 	wrap := func(s string) string {
 		if s == "" || surroundSGR == "" {
 			return s
@@ -162,7 +181,7 @@ func spliceColoredName(name, line, colored, surroundSGR string) string {
 
 	n := len(name)
 	if len(line) >= n && line[len(line)-n:] == name {
-		return wrap(line[:len(line)-n]) + colored
+		return wrap(line[:len(line)-n]) + colored, true
 	}
 
 	marker := name + " -> "
@@ -180,8 +199,18 @@ func spliceColoredName(name, line, colored, surroundSGR string) string {
 	if last != -1 {
 		prefix := line[:last]
 		restAfterName := line[last+n:]
-		return wrap(prefix) + colored + wrap(restAfterName)
+		const arrow = " -> "
+		if isTty && strings.HasPrefix(restAfterName, arrow) {
+			target := restAfterName[len(arrow):]
+			if optQuote && needsAnsiCQuoting(target) {
+				target = ansiCQuote(target)
+			} else {
+				target = sanitizeDisplayName(target)
+			}
+			restAfterName = arrow + target
+		}
+		return wrap(prefix) + colored + wrap(restAfterName), true
 	}
 
-	return wrap(line)
+	return wrap(line), false
 }

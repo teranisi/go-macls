@@ -230,16 +230,47 @@ func buildFinalEntries(names, fullPaths []string, m entryMeta, imgPrefixes, imgS
 	return final
 }
 
+// plainLHasTotal reports whether plainL (a prior real `ls -l` call's
+// output lines -- see runLs()) starts with ls's own "total" header line
+// rather than its first entry's own permissions/owner/size/date/name
+// data.
+//
+// Real ls only ever emits this line when listing a directory (never for
+// explicit non-directory file arguments -- see listTarget(), which always
+// calls this with nEntries from that same, single target), so its
+// presence is inferred here purely from the line count: plainL has
+// exactly one more line than there are entries.
+//
+// This used to instead check strings.HasPrefix(plainL[0], "total "),
+// which silently stopped matching whenever ls's own LANG/LC_ALL differed
+// from the assumption of English output -- e.g. a Japanese locale's
+// `ls -l` prints "合計" ("total"'s Japanese translation), not "total" --
+// so the header line was mistaken for entry 0's own data, and every
+// subsequent entry then got spliced (see renderLongFormat()) against the
+// wrong real ls -l line, one off from where it belonged.
+func plainLHasTotal(plainL []string, nEntries int) bool {
+	return len(plainL) > 0 && len(plainL) == nEntries+1
+}
+
 // renderLongFormat renders -l output: splices the colored name into each
 // of plainL's real permissions/owner/size/date lines, striping odd rows'
 // whole line when opts.stripe. order, when given (opts.groupDirsFirst /
 // opts.x), is the permutation list_target() already applied to
 // names/fullPaths to reorder them; order[i] is that entry's position in
 // plainL, which is still in the original ls order.
-func renderLongFormat(names []string, plainL, final, imgPrefixes []string, opts *Options, order []int) []string {
-	var output []string
+//
+// Also returns matched: matched[i] is whether name i was actually found in
+// plainL[idx] (see spliceColoredName()'s own bool result) -- false means
+// idx pointed at the wrong line (names and plainL fell out of step
+// somehow), so output[i]'s permissions/owner/size/date data doesn't
+// actually belong to this entry. --paging's caller uses this to avoid
+// drawing a thumbnail (which comes from fullPaths, an entirely separate,
+// always-correctly-ordered source, positioned by physical row count rather
+// than tied to this splice) next to a line that isn't actually that
+// thumbnail's own entry.
+func renderLongFormat(names []string, plainL, final, imgPrefixes []string, opts *Options, isTty bool, order []int) (output []string, matched []bool) {
 	li := 0
-	if len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ") {
+	if plainLHasTotal(plainL, len(names)) {
 		output = append(output, plainL[0])
 		li = 1
 	}
@@ -256,10 +287,11 @@ func renderLongFormat(names []string, plainL, final, imgPrefixes []string, opts 
 		if opts.stripe && opts.useColor && i%2 == 1 {
 			surroundSGR = stripeSGR(opts.useTruecolor, opts.theme, false)
 		}
-		spliced := spliceColoredName(name, plainL[idx], final[i][len(imgPrefixes[i]):], surroundSGR)
+		spliced, ok := spliceColoredName(name, plainL[idx], final[i][len(imgPrefixes[i]):], surroundSGR, isTty, opts.quote)
 		output = append(output, imgPrefixes[i]+spliced)
+		matched = append(matched, ok)
 	}
-	return output
+	return output, matched
 }
 
 func minInt(a, b int) int {
@@ -378,7 +410,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	var textWidth func(i int) int
 	if opts.l && plainL != nil {
 		entryLines := plainL
-		if len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ") {
+		if plainLHasTotal(plainL, len(names)) {
 			entryLines = plainL[1:]
 		}
 		textWidth = func(i int) int {
@@ -489,7 +521,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	final := buildFinalEntries(names, fullPaths, m, imgPrefixes, imgSuffixes, mtimes, now, isTty, opts, colOfIdx)
 
 	preambleCount := len(output) // header line, if any
-	hasTotalLine := opts.l && len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ")
+	hasTotalLine := opts.l && plainLHasTotal(plainL, len(names))
 
 	switch {
 	case progressiveMulti && multi && len(final) > 0:
@@ -504,13 +536,28 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		}
 		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termWidth, termHeight, ql)
 	case opts.l:
-		output = append(output, renderLongFormat(names, plainL, final, imgPrefixes, opts, order)...)
+		longLines, matched := renderLongFormat(names, plainL, final, imgPrefixes, opts, isTty, order)
+		output = append(output, longLines...)
 		if progressive {
 			if hasTotalLine {
 				preambleCount++
 			}
 			if preambleCount > 0 && preambleCount <= len(output) {
 				fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
+			}
+			// matched[i] false means plainL[idx] wasn't actually entry i's
+			// own ls -l line (names/plainL fell out of step somehow) --
+			// printPaginated()'s thumbnail placement is positioned by
+			// physical row count in output, entirely independent of
+			// whether the splice above found this entry's name where
+			// expected, so it has no way to notice a mismatch on its own.
+			// Suppressing hasImage here is a defense-in-depth guard against
+			// a technically-correct thumbnail landing next to a line that
+			// isn't actually that thumbnail's own entry.
+			for i, ok := range matched {
+				if !ok && i < len(progressivePlans) {
+					progressivePlans[i].hasImage = false
+				}
 			}
 			printPaginated(output[preambleCount:], progressivePlans, fullPaths, imgWidth, termHeight, ql)
 		} else if len(output) > 0 {

@@ -424,48 +424,56 @@ func boxDownsample(src image.Image, newW, newH int) *image.RGBA {
 	return dst
 }
 
-// preAspectMaxDimSafetyFactor inflates convertHeicForThumbnail()'s and
-// qlmanageThumbnail()'s resize target (see their own doc comments) beyond a
-// flat width*thumbnailPxPerCell, to still cover a strongly portrait-
-// oriented source (a phone photo, an A4/letter document page) adequately:
-// the target is picked before the source's own aspect ratio is known
-// (avoiding a separate metadata-only sips/qlmanage call just to learn it up
-// front), so this errs generous rather than risk shortchanging the
-// thumbnail's longer dimension. 3x covers up to a 3:1 aspect ratio at full
-// requested resolution -- beyond typical even for a portrait phone photo or
-// document page -- while still being a tiny fraction of a real source's own
-// resolution.
+// preAspectMaxDimSafetyFactor inflates convertViaSips()'s/
+// convertViaMagick()'s and qlmanageThumbnail()'s resize target (see their
+// own doc comments) beyond a flat width*thumbnailPxPerCell, to still
+// cover a strongly portrait-oriented source (a phone photo, an A4/letter
+// document page) adequately: the target is picked before the source's
+// own aspect ratio is known (avoiding a separate metadata-only sips/
+// qlmanage call just to learn it up front), so this errs generous rather
+// than risk shortchanging the thumbnail's longer dimension. 3x covers up
+// to a 3:1 aspect ratio at full requested resolution -- beyond typical
+// even for a portrait phone photo or document page -- while still being a
+// tiny fraction of a real source's own resolution.
 const preAspectMaxDimSafetyFactor = 3
 
-// convertHeicForThumbnail converts a HEIC/HEIF file to a PNG already
-// downscaled to fit within maxDim x maxDim, using macOS's built-in `sips`
-// command-line tool -- Apple's own HEIC/HEIF decoder. There's no
-// practical way to decode HEIC in pure Go (it's built on HEVC/H.265 video
-// compression, patent-encumbered and complex enough that neither the
-// standard library nor golang.org/x/image support it), so unlike PNG/
-// JPEG/GIF this can't reuse image.Decode(); shelling out to a real
-// decoder already installed on the target platform matches how this port
-// already delegates ls(1)'s own output rather than reimplementing it.
+// convertViaSips converts a source file buildImagePrefix() can't decode
+// natively -- HEIC/HEIF, or PDF's first page (firstPageOnly) -- to a PNG
+// already downscaled to fit within maxDim x maxDim, using macOS's
+// built-in `sips` command-line tool. There's no practical way to decode
+// HEIC in pure Go (it's built on HEVC/H.265 video compression,
+// patent-encumbered and complex enough that neither the standard library
+// nor golang.org/x/image support it) or PDF (a full page-description
+// format, not an image one), so unlike PNG/JPEG/GIF this can't reuse
+// image.Decode(); shelling out to a real decoder already installed on the
+// target platform matches how this port already delegates ls(1)'s own
+// output rather than reimplementing it.
 //
 // Doing the resize as part of the same sips invocation (-Z), rather than
 // converting at full resolution and letting downscaleForThumbnail()
 // shrink it afterward in Go, means Apple's own decode path never has to
 // materialize the image at full resolution just to have it immediately
 // shrunk again -- a real speed difference for a multi-megapixel phone
-// photo. The resulting PNG is already at or under maxDim on both axes, so
-// downscaleForThumbnail() downstream (see buildImagePrefix()) becomes a
-// cheap no-op for it rather than a second real resize.
+// photo or a scanned PDF. The resulting PNG is already at or under maxDim
+// on both axes, so downscaleForThumbnail() downstream (see
+// buildImagePrefix()) becomes a cheap no-op for it rather than a second
+// real resize.
+//
+// firstPageOnly (needed for a multi-page PDF; a no-op for a single still
+// image like HEIC/HEIF) selects sips's own single-page rasterization --
+// sips only ever renders a PDF's first page regardless, so this exists
+// purely as a signal to convertViaMagick() below, which needs to ask for
+// that explicitly; sips itself takes no extra flag for it.
 //
 // Returns ok=false if sips isn't on PATH (e.g. not running on macOS) or
-// the conversion fails for any reason, in which case the caller falls
-// back to embedding the original HEIC/HEIF file unchanged -- same as any
-// other format this port can't do anything special with.
-func convertHeicForThumbnail(path string, maxDim int) ([]byte, bool) {
+// the conversion fails for any reason, in which case the caller tries
+// convertViaMagick() next (see rasterizeForThumbnail()).
+func convertViaSips(path string, maxDim int, firstPageOnly bool) ([]byte, bool) {
 	sipsPath, err := exec.LookPath("sips")
 	if err != nil {
 		return nil, false
 	}
-	tmp, err := os.CreateTemp("", "macls-heic-*.png")
+	tmp, err := os.CreateTemp("", "macls-sips-*.png")
 	if err != nil {
 		return nil, false
 	}
@@ -484,6 +492,97 @@ func convertHeicForThumbnail(path string, maxDim int) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+var (
+	magickToolOnce sync.Once
+	magickToolPath string
+)
+
+// magickTool returns the path to ImageMagick's magick(1) (v7+, tried
+// first) or convert(1) (v6, or magick's own legacy alias) -- whichever is
+// found on PATH -- or "" if neither is installed. Cached (sync.Once)
+// since PATH and installed tools don't change mid-run, so there's no
+// reason for exec.LookPath()'s own directory-by-directory PATH scan to
+// repeat on every image needing a shrink, potentially many times per
+// directory listing.
+func magickTool() string {
+	magickToolOnce.Do(func() {
+		if p, err := exec.LookPath("magick"); err == nil {
+			magickToolPath = p
+			return
+		}
+		if p, err := exec.LookPath("convert"); err == nil {
+			magickToolPath = p
+		}
+	})
+	return magickToolPath
+}
+
+// convertViaMagick is convertViaSips()'s counterpart for a platform
+// without sips(1) -- primarily Linux, where -I's own WezTerm support
+// means thumbnails are otherwise usable there too -- via ImageMagick's
+// magick(1)/convert(1) (see magickTool()). Mirrors convertViaSips()'s own
+// contract as closely as ImageMagick's equivalent options allow: a PNG
+// downscaled to fit within maxDim x maxDim, flattened against a white
+// background (ImageMagick, unlike sips, would otherwise leave a
+// transparent PDF background as transparent rather than the opaque page
+// background a raw PDF's undefined background usually implies), or
+// ok=false on any failure (neither magick nor convert on PATH, an
+// unsupported/corrupt input, ...).
+//
+// firstPageOnly appends "[0]" to the input filename, ImageMagick's own
+// syntax for selecting just a multi-page/frame source's first page --
+// needed for PDF, matching sips's own single-page rasterization.
+//
+// Many Linux distros' default ImageMagick security policy (policy.xml)
+// disables its PDF/PostScript delegate outright (after past Ghostscript
+// CVEs) -- indistinguishable here from any other failure (just a
+// non-zero exit), so that's one more case this returns false for, same
+// as a missing Ghostscript install would be.
+func convertViaMagick(path string, maxDim int, firstPageOnly bool) ([]byte, bool) {
+	tool := magickTool()
+	if tool == "" {
+		return nil, false
+	}
+	tmp, err := os.CreateTemp("", "macls-magick-*.png")
+	if err != nil {
+		return nil, false
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
+	input := path
+	if firstPageOnly {
+		input = path + "[0]"
+	}
+	resize := strconv.Itoa(maxDim) + "x" + strconv.Itoa(maxDim)
+	cmd := exec.Command(tool, input, "-resize", resize, "-background", "white", "-flatten", tmpPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
+// rasterizeForThumbnail converts path -- a format buildImagePrefix() has
+// no native decoder for (HEIC/HEIF, or PDF's first page) -- to a PNG
+// downscaled to fit within maxDim x maxDim, trying macOS's built-in
+// sips(1) first (see convertViaSips()) and, on a platform without it,
+// ImageMagick's magick(1)/convert(1) next (see convertViaMagick()).
+// Returns ok=false if neither tool is installed or both fail, in which
+// case the caller has no thumbnail for this entry.
+func rasterizeForThumbnail(path string, maxDim int, firstPageOnly bool) ([]byte, bool) {
+	if data, ok := convertViaSips(path, maxDim, firstPageOnly); ok {
+		return data, true
+	}
+	return convertViaMagick(path, maxDim, firstPageOnly)
 }
 
 // qlmanageTimeout bounds how long qlmanageThumbnail() waits for qlmanage(1)
@@ -570,7 +669,8 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 	}
 
 	var data []byte
-	if isQL {
+	switch {
+	case isQL:
 		// No "embed the original file" fallback makes sense here (an OSC
 		// 1337 client can't render a .docx), so any qlmanage failure just
 		// means no thumbnail for this entry.
@@ -580,7 +680,23 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 			return ""
 		}
 		data, ext = converted, ".png"
-	} else {
+	case ext == ".pdf":
+		// Unlike PNG/GIF/BMP/JPEG, PDF isn't a format getImagePixelSize()
+		// can read, so a raw PDF sent unconverted would never get a real
+		// aspect-ratio height -- and there's no reliable way for an OSC
+		// 1337 client to render raw PDF bytes as an image in the first
+		// place. Always rasterized via sips/ImageMagick regardless of
+		// size (see rasterizeForThumbnail()), so a PDF thumbnail is
+		// consistently sized and consistently opaque rather than a raw
+		// pass-through; any failure just means no thumbnail for this
+		// entry, same as an unsupported Quick Look document.
+		maxDim := width * thumbnailPxPerCell * preAspectMaxDimSafetyFactor
+		converted, ok := rasterizeForThumbnail(path, maxDim, true)
+		if !ok {
+			return ""
+		}
+		data, ext = converted, ".png"
+	default:
 		d, err := os.ReadFile(path)
 		if err != nil || len(d) == 0 {
 			return ""
@@ -589,7 +705,7 @@ func buildImagePrefix(path string, width, height, termHeight int, allowAspectHei
 
 		if ext == ".heic" || ext == ".heif" {
 			heicMaxDim := width * thumbnailPxPerCell * preAspectMaxDimSafetyFactor
-			if converted, ok := convertHeicForThumbnail(path, heicMaxDim); ok {
+			if converted, ok := rasterizeForThumbnail(path, heicMaxDim, false); ok {
 				data, ext = converted, ".png"
 			}
 		}
