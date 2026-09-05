@@ -269,11 +269,21 @@ func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, st
 // multiColumnClickLookup builds a clickEntry for printPaginatedMulti()'s
 // multi-column layout. rowOfIdx/colOffsetOfIdx are the whole listing's own
 // global (not page-relative) line/column bookkeeping, from
-// computeImageCellOffsets(); visibleLines is how many of those lines have
-// been printed so far (the current page's own end, or one more after each
-// line/return advance -- see printPaginatedMulti()). Returns nil if
-// nothing visible so far has a thumbnail.
-func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, visibleLines int) clickEntry {
+// computeImageCellOffsets(); lineRows is that same listing's per-line
+// physical row count (see lineRowCounts()) -- almost always 1, except a
+// line holding one oversized entry alone, which wraps to more than one
+// physical row on its own, same as printPaginated()'s wrapped-line
+// entries. visibleLines is how many logical lines have been printed so
+// far (the current page's own end, or one more after each line/return
+// advance -- see printPaginatedMulti()). Returns nil if nothing visible so
+// far has a thumbnail.
+//
+// Builds spans of rowsUp (rows above the prompt's own line, 1 = the row
+// directly above it) per logical line from the bottom up, the same way
+// singleColumnClickLookup() does per entry -- a line's own wrapped
+// continuation rows count as that line for click purposes, not just its
+// first physical row (the only one an image can actually sit on).
+func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth int, lineRows []int, visibleLines int) clickEntry {
 	any := false
 	for i := range fullPaths {
 		if hasImage[i] && rowOfIdx[i] < visibleLines {
@@ -284,11 +294,28 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 	if !any {
 		return nil
 	}
+	type lineSpan struct{ line, lo, hi int }
+	var spans []lineSpan
+	acc := 0
+	for line := visibleLines - 1; line >= 0; line-- {
+		r := 1
+		if line < len(lineRows) && lineRows[line] > 0 {
+			r = lineRows[line]
+		}
+		spans = append(spans, lineSpan{line: line, lo: acc + 1, hi: acc + r})
+		acc += r
+	}
 	return func(rowsUp, col int) (string, bool) {
 		if rowsUp < 1 {
 			return "", false
 		}
-		targetLine := visibleLines - rowsUp
+		targetLine := -1
+		for _, sp := range spans {
+			if rowsUp >= sp.lo && rowsUp <= sp.hi {
+				targetLine = sp.line
+				break
+			}
+		}
 		if targetLine < 0 {
 			return "", false
 		}

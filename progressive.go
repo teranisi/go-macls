@@ -406,7 +406,9 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 			if !haveRow {
 				continue
 			}
-			if path, ok := lookup(promptRow-mouseRow, col); ok {
+			rowsUp := promptRow - mouseRow
+			path, ok := lookup(rowsUp, col)
+			if ok {
 				clicked = path
 			} else {
 				clicked = "" // clicked elsewhere: deselect
@@ -428,16 +430,50 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	}
 }
 
+// lineRowCounts is how many physical terminal rows each of lines (one
+// rendered multi-column grid row, already containing any color/OSC-8
+// escapes -- see renderMultiColumnLayout()) occupies once termWidth wraps
+// it -- almost always 1, except a row holding one oversized entry alone
+// (computeMultiColumnLayout()'s own "let it through" case for an entry
+// too wide for any column arrangement), which wraps like any other long
+// printed line. Escapes are measured via plainDisplayWidth(), not
+// displayWidth(), since they carry no screen width of their own.
+func lineRowCounts(lines []string, termWidth int) []int {
+	counts := make([]int, len(lines))
+	for i, l := range lines {
+		counts[i] = maxInt(1, ceilDiv(plainDisplayWidth(l), termWidth))
+	}
+	return counts
+}
+
+// cumulativeRows returns, for each entry of lineRows, how many physical
+// rows precede it (starts[i]), plus the grand total -- the physical-row
+// counterpart of a plain running index sum, used to convert a logical
+// grid-row index into an actual on-screen row offset.
+func cumulativeRows(lineRows []int) (starts []int, total int) {
+	starts = make([]int, len(lineRows))
+	acc := 0
+	for i, r := range lineRows {
+		starts[i] = acc
+		acc += r
+	}
+	return starts, acc
+}
+
 // renderProgressiveMultiImages is renderProgressiveImages()'s multi-column
 // counterpart. Unlike -1/-l, several entries there can share one rendered
 // line, so a deferred draw needs a horizontal jump (colOffsetOfIdx, see
 // computeImageCellOffsets()) as well as the vertical one -- and since a
 // thumbnail is already forced to exactly 1 row in multi-column output (see
 // buildImagePrefix()'s allowAspectHeight), there's no stacked/multi-row
-// case to account for here. rowOfIdx and colOffsetOfIdx are page-relative:
-// row 0 is the first line printed for the page currently being drawn into,
-// and totalLines is how many lines that page holds.
-func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, totalLines, termHeight int, ql qlExtensions) {
+// case to account for here (an oversized entry's own wrapped continuation
+// rows never carry any image, just more of its own text). rowOfIdx and
+// colOffsetOfIdx are page-relative: logical row 0 is the first line
+// printed for the page currently being drawn into; lineRows holds that
+// same page's own per-line physical row counts (see lineRowCounts()), so a
+// row that itself wrapped doesn't throw off every later entry's placement.
+func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth int, lineRows []int, termHeight int, ql qlExtensions) {
+	starts, totalRows := cumulativeRows(lineRows)
 	var order []int
 	for i, has := range hasImage {
 		if has {
@@ -460,7 +496,7 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	for _, i := range order {
-		rowsUp := totalLines - rowOfIdx[i]
+		rowsUp := totalRows - starts[rowOfIdx[i]]
 		if rowsUp >= termHeight {
 			// Already scrolled off; see renderProgressiveImages().
 			continue
@@ -496,14 +532,20 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 // pages are grouped by rendered LINE (a line can hold many entries' worth
 // of columns) rather than by per-entry row count, and each entry's
 // thumbnail is placed via renderProgressiveMultiImages() at its own
-// (row, column) cell within the page rather than always column 0. Same
+// (row, column) cell within the page rather than always column 0. A page
+// is filled by physical row count, not raw line count -- same as
+// printPaginated()'s own plans[i].rows() accumulation -- since a line
+// holding one oversized entry (see computeMultiColumnLayout()'s "let it
+// through" case) wraps to more than one physical row on its own, same as
+// printPaginated()'s wrapped-line entries (see lineRowCounts()). Same
 // final-prompt-even-on-one-page behavior as printPaginated() when
 // anything on screen has a thumbnail -- see its own doc comment.
-func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termHeight int, ql qlExtensions) {
+func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termWidth, termHeight int, ql qlExtensions) {
 	n := len(lines)
 	if n == 0 {
 		return
 	}
+	lineRows := lineRowCounts(lines, termWidth)
 	pageCapacity := termHeight - pagerPromptRows
 	if pageCapacity < 1 {
 		pageCapacity = 1
@@ -526,18 +568,27 @@ func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfI
 			pRowOfIdx = append(pRowOfIdx, rowOfIdx[i]-start)
 			pColOffset = append(pColOffset, colOffsetOfIdx[i])
 		}
-		renderProgressiveMultiImages(pFullPaths, pHasImage, pRowOfIdx, pColOffset, imgWidth, end-start, termHeight, ql)
+		renderProgressiveMultiImages(pFullPaths, pHasImage, pRowOfIdx, pColOffset, imgWidth, lineRows[start:end], termHeight, ql)
 	}
 
 	start := 0
 outer:
 	for start < n {
-		end := minInt(start+pageCapacity, n)
+		end := start
+		rows := 0
+		for end < n {
+			r := lineRows[end]
+			if rows > 0 && rows+r > pageCapacity {
+				break
+			}
+			rows += r
+			end++
+		}
 		renderPage(start, end)
 		start = end
 
 		for canPrompt {
-			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, start)
+			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, lineRows, start)
 			if start >= n && lookup == nil {
 				// Nothing left to page through, and nothing on screen to
 				// click either -- no reason to prompt at all, matching

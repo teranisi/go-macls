@@ -4,10 +4,52 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 	"golang.org/x/text/width"
 )
+
+// plainDisplayWidth is displayWidth(), but for a string that may contain
+// ANSI escape sequences (SGR color codes, OSC 8 "\033]8;;url\033\\...\033]8;;\033\\"
+// hyperlinks around a clickable path) -- the kind buildFinalEntries()/
+// renderMultiColumnLayout() actually print, as opposed to the plain name
+// text displayWidth() is normally fed. The escape bytes themselves take no
+// screen width, so a CSI sequence ("\033[" ... a final byte in 0x40-0x7E)
+// or an OSC sequence ("\033]" ... BEL or the two-byte ST "\033\\") is
+// skipped entirely rather than measured rune-by-rune.
+func plainDisplayWidth(s string) int {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1B && i+1 < len(s) && (s[i+1] == '[' || s[i+1] == ']') {
+			isOSC := s[i+1] == ']'
+			j := i + 2
+			for j < len(s) {
+				if isOSC {
+					if s[j] == 0x07 {
+						j++
+						break
+					}
+					if s[j] == 0x1B && j+1 < len(s) && s[j+1] == '\\' {
+						j += 2
+						break
+					}
+				} else if s[j] >= 0x40 && s[j] <= 0x7E {
+					j++
+					break
+				}
+				j++
+			}
+			i = j
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return displayWidth(b.String())
+}
 
 // displayWidth returns the actual display width of name (2 for full-width
 // characters, 1 for half-width). macOS's filesystem returns filenames in

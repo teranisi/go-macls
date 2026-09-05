@@ -502,7 +502,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		if preambleCount > 0 {
 			fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
 		}
-		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termHeight, ql)
+		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termWidth, termHeight, ql)
 	case opts.l:
 		output = append(output, renderLongFormat(names, plainL, final, imgPrefixes, opts, order)...)
 		if progressive {
