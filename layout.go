@@ -176,10 +176,23 @@ func computeMultiColumnLayout(namelen []int, optF bool, optColumns string, width
 		return false
 	}
 
+	// gridFits reports whether every physical row of grid, at this
+	// candidate rows count, actually fits within width. An entry wider
+	// than the whole terminal on its own (a name long enough that no
+	// column arrangement could ever make it fit) is let through anyway --
+	// it's going to wrap on its own regardless of layout, and rejecting
+	// every candidate over that one entry would only make the rest of the
+	// grid worse -- but only when it's the row's sole occupant: letting
+	// some OTHER entry share that same physical row (silently excluded
+	// from the width total below, as if it cost nothing) would place that
+	// other entry's own text wherever the oversized one's wrapped
+	// continuation happens to land, corrupting both.
 	gridFits := func(grid [][]int, rows int) bool {
 		effectiveLast := effectiveLastColumn(grid)
 		for r := 0; r < rows; r++ {
 			total := 0
+			slots := 0
+			hasOversized := false
 			for c, col := range grid {
 				v := col[r]
 				var w int
@@ -195,9 +208,15 @@ func computeMultiColumnLayout(namelen []int, optF bool, optColumns string, width
 				} else {
 					continue
 				}
-				if w <= width {
+				slots++
+				if w > width {
+					hasOversized = true
+				} else {
 					total += w
 				}
+			}
+			if hasOversized && slots > 1 {
+				return false
 			}
 			if total > width {
 				return false
