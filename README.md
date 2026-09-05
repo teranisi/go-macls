@@ -28,27 +28,6 @@ implements the same CLI surface.
 - Everything else — every flag, every color rule, the compact column
   layout algorithm, `--quote`/ANSI-C quoting, the unsupported-option
   fallback to real `ls` — is a direct, behavior-for-behavior port.
-- HEIC/HEIF `-I` thumbnails go through `sips`: there's no practical way to
-  decode HEIC in pure Go (it's built on patent-encumbered HEVC/H.265
-  compression, unsupported by both the standard library and
-  `golang.org/x/image`), re-encoded as PNG (matching the rest of this
-  port's own downscaling pipeline, which decodes PNG/JPEG/GIF natively in
-  Go rather than shelling out). The Python original independently arrived
-  at the same fix for the same "`-I` feels slow over a directory of large
-  photos" problem this port also ran into — its own `sips`-based shrink
-  step (any image format above a size threshold, re-encoded as JPEG)
-  covers HEIC/HEIF the same as everything else, so in practice this is no
-  longer a real behavioral difference between the two.
-- **Quick Look (`--ql-ext`) thumbnails come back from `qlmanage` as PNG,
-  not re-encoded to JPEG.** The Python original renders a Word/Excel/
-  PowerPoint preview via `qlmanage -t`, then always re-encodes it through
-  its own `sips`-based shrink step (JPEG output). This port already has a
-  native Go PNG/JPEG/GIF downscaling pipeline it reuses for every other
-  oversized thumbnail (see the HEIC note above), so it leaves `qlmanage`'s
-  own PNG output as-is (further downscaled in Go if still larger than the
-  target cell size) instead of adding a second shell-out just to change
-  format — no user-visible difference, since both end up sized the same
-  and iTerm2 renders either format identically.
 - **`--paging`, an extra option with no equivalent in the Python
   original.** The Python original has since gained its own default
   streaming behavior for `-1`/`-l`: each entry's line prints as soon as
