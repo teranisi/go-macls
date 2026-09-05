@@ -236,7 +236,7 @@ outer:
 		renderPage(start, i)
 
 		for i < n && canPrompt {
-			switch waitForContinue() {
+			switch waitForContinue(singleColumnHoverLookup(fullPaths, plans, imgWidth, start, i)) {
 			case pagerActionQuit:
 				pagerQuit = true
 				return
@@ -260,15 +260,28 @@ const (
 	pagerActionQuit                    // q, Ctrl-C, Esc
 )
 
-// waitForContinue prints a "-- more --" prompt and blocks for a single
-// keypress on standard input, put into raw mode for the duration so the
-// key doesn't need Enter and isn't echoed. Space continues to the next full
-// page; return (or a newline) continues just one line/entry, same as
-// more(1)/less(1)'s own line-at-a-time key; q, Ctrl-C, or Esc quits;
-// anything else is ignored and it keeps waiting. A read error/EOF on
-// standard input is treated the same as space, so an unexpectedly closed
-// input can't hang the listing.
-func waitForContinue() pagerAction {
+// waitForContinue prints a "-- more --" prompt and blocks for input on
+// standard input, put into raw mode for the duration so a key doesn't need
+// Enter and isn't echoed. Space continues to the next full page; return (or
+// a newline) continues just one line/entry, same as more(1)/less(1)'s own
+// line-at-a-time key; q, Ctrl-C, or Esc quits; anything else is ignored and
+// it keeps waiting. A read error/EOF on standard input is treated the same
+// as space, so an unexpectedly closed input can't hang the listing.
+//
+// lookup is nil for a page with no thumbnails at all, in which case this
+// is exactly the plain keys-only prompt above. Otherwise (experimental --
+// see hover.go) it also turns on mouse motion reporting for the duration of
+// this one prompt: hovering a thumbnail and then pressing space opens it in
+// a real Quick Look window (qlmanage -p) instead of advancing, and the
+// prompt keeps waiting at the same page.
+func waitForContinue(lookup hoverEntry) pagerAction {
+	if lookup == nil {
+		return waitForContinuePlain()
+	}
+	return waitForContinueHover(lookup)
+}
+
+func waitForContinuePlain() pagerAction {
 	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
 	defer fmt.Print("\r\033[K") // erase the prompt before the next page
 
@@ -292,6 +305,61 @@ func waitForContinue() pagerAction {
 			return pagerActionLine
 		case 'q', 'Q', 3 /* Ctrl-C */, 27 /* Esc */ :
 			return pagerActionQuit
+		}
+	}
+}
+
+// waitForContinueHover is waitForContinue()'s thumbnail-aware counterpart
+// (see hover.go). It additionally queries the cursor's current row (DSR)
+// and turns on mouse motion reporting so a plain space, pressed while the
+// pointer sits over a thumbnail cell, opens that entry in Quick Look and
+// keeps waiting at the same prompt instead of advancing; a space anywhere
+// else behaves exactly like the plain prompt.
+func waitForContinueHover(lookup hoverEntry) pagerAction {
+	fmt.Print("-- more (space to continue, return for one line, q to quit; hover a thumbnail + space for Quick Look) --")
+	defer fmt.Print("\r\033[K")
+
+	fd := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return pagerActionPage
+	}
+	defer term.Restore(fd, oldState)
+
+	promptRow, haveRow := queryCursorRow(os.Stdin)
+
+	fmt.Print(mouseTrackingEnable)
+	defer fmt.Print(mouseTrackingDisable)
+
+	r := newEscReader(os.Stdin)
+	hovered := ""
+	for {
+		kind, key, col, mouseRow := r.next()
+		switch kind {
+		case escEventEOF:
+			return pagerActionPage
+		case escEventMouseMove:
+			if !haveRow {
+				continue
+			}
+			if path, ok := lookup(promptRow-mouseRow, col); ok {
+				hovered = path
+			} else {
+				hovered = ""
+			}
+		case escEventKey:
+			switch key {
+			case ' ':
+				if hovered != "" {
+					launchQuickLook(hovered)
+					continue
+				}
+				return pagerActionPage
+			case '\r', '\n':
+				return pagerActionLine
+			case 'q', 'Q', 3 /* Ctrl-C */, 27 /* Esc */ :
+				return pagerActionQuit
+			}
 		}
 	}
 }
@@ -399,7 +467,7 @@ outer:
 		start = end
 
 		for start < n && canPrompt {
-			switch waitForContinue() {
+			switch waitForContinue(multiColumnHoverLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, start)) {
 			case pagerActionQuit:
 				pagerQuit = true
 				return

@@ -63,6 +63,21 @@ implements the same CLI surface.
   terminal; otherwise (e.g. output piped to a file) every page prints
   back-to-back with no pause.
 
+  **Experimental, no equivalent in the Python original either:** with
+  `-I`, hovering the mouse over a thumbnail at the `-- more --` prompt and
+  pressing space opens that entry in a real Quick Look window
+  (`qlmanage -p`) instead of advancing — the prompt keeps waiting at the
+  same page either way, so this doesn't cost you your place in the
+  listing. It turns on xterm-style mouse motion reporting only for the
+  duration of that one prompt (asking the terminal for its cursor
+  position first, via a Device Status Report, to know where each entry's
+  own row actually is on screen), so it has no effect once you move past
+  the prompt, and none at all without `--paging` (nothing here reads the
+  mouse otherwise). This is a rough prototype — mouse reporting and
+  Device Status Report are both widely supported, but this has only been
+  exercised with synthetic escape sequences in a sandbox with no real
+  iTerm2, a real mouse, or a real Quick Look window to check against.
+
 ## Build
 
 ```bash
