@@ -205,7 +205,12 @@ const pagerPromptRows = 1
 // entry (then prompts again, so holding return steps through the listing
 // one entry at a time); otherwise (input isn't interactive) it just keeps
 // going without pausing, matching how a non-interactive pager falls back to
-// a plain dump rather than hanging.
+// a plain dump rather than hanging. Even a listing that fits on one screen
+// still gets this same final prompt if anything on it has a thumbnail --
+// clicking one there and pressing space still opens Quick Look (see
+// preview.go) -- but not otherwise, matching this function's own pre-
+// Quick-Look behavior for a plain text listing that never needed more
+// than one page.
 func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, imgWidth, termHeight int, ql qlExtensions) {
 	n := minInt(len(entryLines), len(plans))
 	if n == 0 {
@@ -239,14 +244,28 @@ outer:
 		}
 		renderPage(start, i)
 
-		for i < n && canPrompt {
-			switch waitForContinue(singleColumnClickLookup(fullPaths, plans, imgWidth, start, i)) {
+		for canPrompt {
+			lookup := singleColumnClickLookup(fullPaths, plans, imgWidth, start, i)
+			if i >= n && lookup == nil {
+				// Nothing left to page through, and nothing on screen to
+				// click either -- no reason to prompt at all, matching
+				// --paging's older behavior for a listing that never
+				// needed more than one page.
+				break
+			}
+			switch waitForContinue(lookup) {
 			case pagerActionQuit:
 				pagerQuit = true
 				return
 			case pagerActionLine:
-				renderPage(i, i+1)
-				i++
+				if i < n {
+					renderPage(i, i+1)
+					i++
+				} else {
+					// Nothing left to advance by a line; same as a page
+					// advance below, just finish.
+					continue outer
+				}
 			default: // pagerActionPage
 				continue outer
 			}
@@ -443,7 +462,9 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 // pages are grouped by rendered LINE (a line can hold many entries' worth
 // of columns) rather than by per-entry row count, and each entry's
 // thumbnail is placed via renderProgressiveMultiImages() at its own
-// (row, column) cell within the page rather than always column 0.
+// (row, column) cell within the page rather than always column 0. Same
+// final-prompt-even-on-one-page behavior as printPaginated() when
+// anything on screen has a thumbnail -- see its own doc comment.
 func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termHeight int, ql qlExtensions) {
 	n := len(lines)
 	if n == 0 {
@@ -481,14 +502,28 @@ outer:
 		renderPage(start, end)
 		start = end
 
-		for start < n && canPrompt {
-			switch waitForContinue(multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, start)) {
+		for canPrompt {
+			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, start)
+			if start >= n && lookup == nil {
+				// Nothing left to page through, and nothing on screen to
+				// click either -- no reason to prompt at all, matching
+				// --paging's older behavior for a listing that never
+				// needed more than one page.
+				break
+			}
+			switch waitForContinue(lookup) {
 			case pagerActionQuit:
 				pagerQuit = true
 				return
 			case pagerActionLine:
-				renderPage(start, start+1)
-				start++
+				if start < n {
+					renderPage(start, start+1)
+					start++
+				} else {
+					// Nothing left to advance by a line; same as a page
+					// advance below, just finish.
+					continue outer
+				}
 			default: // pagerActionPage
 				continue outer
 			}

@@ -73,7 +73,11 @@ implements the same CLI surface.
   for its cursor position first, via a Device Status Report, to know
   where each entry's own row actually is on screen), so it has no effect
   once you move past the prompt, and none at all without `--paging`
-  (nothing here reads the mouse otherwise).
+  (nothing here reads the mouse otherwise). This prompt still appears even
+  for a listing that fits on one screen and would otherwise never need to
+  pause at all, as long as there's a thumbnail on it to click — but not
+  for a plain text listing (no `-I`, or nothing on screen has a
+  thumbnail), which keeps behaving exactly as before.
 
   This is deliberately click-gated rather than triggered by the mouse
   merely passing over a thumbnail: an earlier hover-triggered version of
