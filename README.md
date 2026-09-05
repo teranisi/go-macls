@@ -64,19 +64,33 @@ implements the same CLI surface.
   back-to-back with no pause.
 
   **Experimental, no equivalent in the Python original either:** with
-  `-I`, hovering the mouse over a thumbnail at the `-- more --` prompt and
-  pressing space opens that entry in a real Quick Look window
-  (`qlmanage -p`) instead of advancing — the prompt keeps waiting at the
-  same page either way, so this doesn't cost you your place in the
-  listing. It turns on xterm-style mouse motion reporting only for the
-  duration of that one prompt (asking the terminal for its cursor
-  position first, via a Device Status Report, to know where each entry's
-  own row actually is on screen), so it has no effect once you move past
-  the prompt, and none at all without `--paging` (nothing here reads the
-  mouse otherwise). This is a rough prototype — mouse reporting and
-  Device Status Report are both widely supported, but this has only been
-  exercised with synthetic escape sequences in a sandbox with no real
-  iTerm2, a real mouse, or a real Quick Look window to check against.
+  `-I`, clicking a thumbnail at the `-- more --` prompt and then pressing
+  space opens that entry in a real Quick Look window (`qlmanage -p`)
+  instead of advancing — the prompt keeps waiting at the same page either
+  way, so this doesn't cost you your place in the listing. Clicking
+  elsewhere first deselects it. It turns on xterm-style mouse click
+  reporting only for the duration of that one prompt (asking the terminal
+  for its cursor position first, via a Device Status Report, to know
+  where each entry's own row actually is on screen), so it has no effect
+  once you move past the prompt, and none at all without `--paging`
+  (nothing here reads the mouse otherwise).
+
+  This is deliberately click-gated rather than triggered by the mouse
+  merely passing over a thumbnail: an earlier hover-triggered version of
+  this was tried and, on a real machine, one problematic file wedged the
+  same shared Quick Look preview service Finder itself depends on badly
+  enough to freeze Finder along with it, needing a hard reboot. Requiring
+  an actual click cuts down how easily that happens again — hovering the
+  mouse across the screen can no longer trigger it — but doesn't remove
+  the underlying risk: a genuinely bad file can still wedge that shared
+  service even when deliberately clicked, and macls has no way to prevent
+  or recover from that once it happens. Treat this as inherently somewhat
+  risky, independent of anything this code can control, and use it
+  sparingly rather than routinely. It's also still a rough prototype
+  otherwise — mouse reporting and Device Status Report are both widely
+  supported, but this has only been exercised with synthetic escape
+  sequences in a sandbox with no real iTerm2, mouse, or Quick Look window
+  to check against.
 
 ## Build
 

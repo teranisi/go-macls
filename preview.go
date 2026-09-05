@@ -11,24 +11,38 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Experimental: --paging's "hover a thumbnail, press space for a real Quick
+// Experimental: --paging's "click a thumbnail, press space for a real Quick
 // Look window" prototype. Scoped entirely to the --paging prompt (the only
 // place macls already reads raw keystrokes interactively), it turns on
-// xterm-style mouse motion reporting only while blocked at the "-- more --"
-// prompt, maps a reported cell back to whichever entry's thumbnail sits
+// xterm-style mouse click reporting only while blocked at the "-- more --"
+// prompt, maps a reported click back to whichever entry's thumbnail sits
 // there (using the same row/column bookkeeping already computed to draw
 // thumbnails in the first place), and shells out to qlmanage -p -- macOS's
-// own Quick Look panel, a real GUI window -- when space is pressed while
-// hovering one. Unverified against a real terminal/mouse; see README.
+// own Quick Look panel, a real GUI window -- when space is next pressed
+// while that entry is still the one last clicked.
+//
+// Deliberately click-gated, not hover-triggered: an earlier version fired
+// qlmanage -p just from the mouse passing over a thumbnail, which turned
+// out to be dangerous in practice -- qlmanage -p depends on the same
+// QuickLook preview-generation service Finder itself uses, and on a real
+// machine a single problematic file wedged that shared service badly
+// enough to freeze Finder along with it, needing a hard reboot to recover.
+// Gating on an actual click (a deliberate, one-at-a-time action, not
+// something the mouse can trigger by merely passing across the screen)
+// cuts down how easily that can happen again, but does not remove the
+// underlying risk: a genuinely bad file can still wedge the same shared
+// service even when deliberately clicked. Treat this as inherently
+// somewhat risky, independent of anything macls itself can control -- see
+// README.
 
-// mouseTrackingEnable/mouseTrackingDisable turn xterm "any event" mouse
-// reporting (mode 1003: every pointer move, not just clicks) on and off,
-// in SGR extended-coordinate form (mode 1006, so columns/rows past 223
-// don't wrap). Always paired with a defer'd disable -- leaving this on
-// would make the user's shell echo raw mouse escape codes after macls
-// exits.
-const mouseTrackingEnable = "\033[?1003h\033[?1006h"
-const mouseTrackingDisable = "\033[?1003l\033[?1006l"
+// mouseTrackingEnable/mouseTrackingDisable turn on xterm "normal" mouse
+// click reporting (mode 1000: button press/release, never idle motion) in
+// SGR extended-coordinate form (mode 1006, so columns/rows past 223 don't
+// wrap), and back off again. Always paired with a defer'd disable --
+// leaving this on would make the user's shell echo raw mouse escape codes
+// after macls exits.
+const mouseTrackingEnable = "\033[?1000h\033[?1006h"
+const mouseTrackingDisable = "\033[?1000l\033[?1006l"
 
 // waitReadable reports whether f has input ready within d, using poll(2)
 // rather than a read deadline (os.File read deadlines aren't reliably
@@ -45,7 +59,7 @@ func waitReadable(f *os.File, d time.Duration) bool {
 // be in raw mode. Returns ok=false on any read/parse failure or timeout
 // (e.g. a terminal that doesn't answer DSR at all) -- the caller then has
 // no way to place mouse reports relative to the page's own content and
-// should skip hover tracking entirely for this prompt.
+// should skip click tracking entirely for this prompt.
 func queryCursorRow(f *os.File) (row int, ok bool) {
 	os.Stdout.WriteString("\033[6n")
 	deadline := time.Now().Add(200 * time.Millisecond)
@@ -87,13 +101,13 @@ type escEventKind int
 const (
 	escEventEOF escEventKind = iota
 	escEventKey
-	escEventMouseMove
+	escEventMouseClick
 )
 
 // escReader reads raw bytes from an already-raw-mode terminal fd and turns
-// them into a stream of plain keys or parsed SGR mouse-motion reports,
+// them into a stream of plain keys or parsed SGR mouse-click reports,
 // silently absorbing any other escape sequence it doesn't understand
-// (including SGR mouse click/drag/release reports, which this prototype
+// (including SGR mouse release/motion/wheel reports, which this prototype
 // has no use for) and re-reading until it has something to return.
 //
 // A bare Esc keypress and the start of any other CSI escape sequence both
@@ -135,19 +149,22 @@ func (r *escReader) next() (kind escEventKind, key byte, col, row int) {
 		}
 		if len(seq) > 0 && seq[0] == '<' {
 			last := seq[len(seq)-1]
-			if last == 'M' || last == 'm' {
+			if last == 'M' {
 				if cb, cx, cy, ok := parseSGRMouse(seq); ok {
-					// Motion with no button held (any-event tracking's
-					// idle-move report): bit 5 (32) set, low 2 button
-					// bits read as 3 ("no button"). Anything else --
-					// an actual click/drag/release -- this prototype
-					// has no use for, so it's silently dropped and the
-					// loop reads the next event instead.
-					if cb&32 != 0 && cb&3 == 3 {
-						return escEventMouseMove, 0, cx, cy
+					// A genuine button press: bit 5 (32, motion) and bit 6
+					// (64, wheel/extra buttons) both clear. Under mode
+					// 1000 (see mouseTrackingEnable) the terminal
+					// shouldn't report anything else in the first place,
+					// but the check stays defensive regardless. Which
+					// button doesn't matter -- any of them selects
+					// whatever's under the pointer.
+					if cb&32 == 0 && cb&64 == 0 {
+						return escEventMouseClick, 0, cx, cy
 					}
 				}
 			}
+			// A release ('m'), or anything else this prototype has no use
+			// for: fall through and keep reading.
 		}
 		// Unrecognized/uninteresting CSI sequence: keep reading.
 	}
@@ -202,27 +219,27 @@ func parseSGRMouse(seq []byte) (cb, cx, cy int, ok bool) {
 	return cb, cx, cy, true
 }
 
-// hoverEntry maps a terminal cell -- rowsUp (how many rows above the
+// clickEntry maps a terminal cell -- rowsUp (how many rows above the
 // prompt's own line, 1 = the row directly above it) and col (1-based
 // terminal column) -- to the full path of the thumbnail entry occupying
 // that cell, if any. Built fresh for each page by printPaginated()/
 // printPaginatedMulti() from the same row/column bookkeeping used to
 // actually draw thumbnails (see renderProgressiveImages()/
 // renderProgressiveMultiImages()).
-type hoverEntry func(rowsUp, col int) (path string, ok bool)
+type clickEntry func(rowsUp, col int) (path string, ok bool)
 
-// singleColumnHoverLookup builds a hoverEntry for printPaginated()'s
+// singleColumnClickLookup builds a clickEntry for printPaginated()'s
 // -1/-l layout: entries [start, end) are the ones currently visible on
 // screen (the page just rendered, plus any single-entry lines added since
 // by a return/line advance -- see printPaginated()), and rowsUp for each is
 // measured from the bottom entry upward, matching how
 // renderProgressiveImages() itself measures rowsUp from wherever the
 // cursor currently sits. A stacked entry's whole block (its own text row
-// plus every image row below it) counts as that entry for hover purposes,
+// plus every image row below it) counts as that entry for click purposes,
 // not just the exact row the image itself draws into. Returns nil if none
 // of [start, end) has a thumbnail at all, so the caller can skip mouse
-// tracking entirely for a page with nothing to hover.
-func singleColumnHoverLookup(fullPaths []string, plans []imagePlan, imgWidth, start, end int) hoverEntry {
+// tracking entirely for a page with nothing to click.
+func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, start, end int) clickEntry {
 	type span struct{ idx, lo, hi int }
 	var spans []span
 	acc := 0
@@ -249,14 +266,14 @@ func singleColumnHoverLookup(fullPaths []string, plans []imagePlan, imgWidth, st
 	}
 }
 
-// multiColumnHoverLookup builds a hoverEntry for printPaginatedMulti()'s
+// multiColumnClickLookup builds a clickEntry for printPaginatedMulti()'s
 // multi-column layout. rowOfIdx/colOffsetOfIdx are the whole listing's own
 // global (not page-relative) line/column bookkeeping, from
 // computeImageCellOffsets(); visibleLines is how many of those lines have
 // been printed so far (the current page's own end, or one more after each
 // line/return advance -- see printPaginatedMulti()). Returns nil if
 // nothing visible so far has a thumbnail.
-func multiColumnHoverLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, visibleLines int) hoverEntry {
+func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth, visibleLines int) clickEntry {
 	any := false
 	for i := range fullPaths {
 		if hasImage[i] && rowOfIdx[i] < visibleLines {
@@ -296,6 +313,11 @@ func multiColumnHoverLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 // inline) so it doesn't block the pager's own input loop; the goroutine
 // just reaps the child once its window is closed to avoid a zombie
 // process. No-ops if qlmanage isn't on PATH (e.g. not running on macOS).
+//
+// See this file's own top-of-file comment: qlmanage -p has been observed,
+// on a real machine, to wedge the shared QuickLook service badly enough to
+// freeze Finder along with it. Only ever call this for a file the user
+// just explicitly clicked -- never from a passive signal like hovering.
 func launchQuickLook(path string) {
 	qlPath, err := exec.LookPath("qlmanage")
 	if err != nil {

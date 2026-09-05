@@ -557,9 +557,9 @@ Options:
             read before anything prints. Without --paging (the
             default), the whole listing (and, with -I, every thumbnail)
             prints without ever pausing partway through.
-            Experimental, with -I: hovering a thumbnail at the prompt and
-            pressing space opens it in a real Quick Look window instead
-            of advancing -- see README.
+            Experimental, with -I: clicking a thumbnail at the prompt and
+            then pressing space opens it in a real Quick Look window
+            instead of advancing -- see README.
   -t        Sort by modification time, newest first
   -S        Sort by file size, largest first
   -X        Sort by extension

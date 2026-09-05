@@ -236,7 +236,7 @@ outer:
 		renderPage(start, i)
 
 		for i < n && canPrompt {
-			switch waitForContinue(singleColumnHoverLookup(fullPaths, plans, imgWidth, start, i)) {
+			switch waitForContinue(singleColumnClickLookup(fullPaths, plans, imgWidth, start, i)) {
 			case pagerActionQuit:
 				pagerQuit = true
 				return
@@ -270,15 +270,15 @@ const (
 //
 // lookup is nil for a page with no thumbnails at all, in which case this
 // is exactly the plain keys-only prompt above. Otherwise (experimental --
-// see hover.go) it also turns on mouse motion reporting for the duration of
-// this one prompt: hovering a thumbnail and then pressing space opens it in
-// a real Quick Look window (qlmanage -p) instead of advancing, and the
-// prompt keeps waiting at the same page.
-func waitForContinue(lookup hoverEntry) pagerAction {
+// see preview.go) it also turns on mouse click reporting for the duration
+// of this one prompt: clicking a thumbnail and then pressing space opens
+// it in a real Quick Look window (qlmanage -p) instead of advancing, and
+// the prompt keeps waiting at the same page.
+func waitForContinue(lookup clickEntry) pagerAction {
 	if lookup == nil {
 		return waitForContinuePlain()
 	}
-	return waitForContinueHover(lookup)
+	return waitForContinueClick(lookup)
 }
 
 func waitForContinuePlain() pagerAction {
@@ -309,14 +309,15 @@ func waitForContinuePlain() pagerAction {
 	}
 }
 
-// waitForContinueHover is waitForContinue()'s thumbnail-aware counterpart
-// (see hover.go). It additionally queries the cursor's current row (DSR)
-// and turns on mouse motion reporting so a plain space, pressed while the
-// pointer sits over a thumbnail cell, opens that entry in Quick Look and
-// keeps waiting at the same prompt instead of advancing; a space anywhere
-// else behaves exactly like the plain prompt.
-func waitForContinueHover(lookup hoverEntry) pagerAction {
-	fmt.Print("-- more (space to continue, return for one line, q to quit; hover a thumbnail + space for Quick Look) --")
+// waitForContinueClick is waitForContinue()'s thumbnail-aware counterpart
+// (see preview.go). It additionally queries the cursor's current row (DSR)
+// and turns on mouse click reporting so that pressing space right after
+// clicking a thumbnail opens that entry in Quick Look and keeps waiting at
+// the same prompt instead of advancing; clicking elsewhere first clears
+// that selection, and a space with nothing selected behaves exactly like
+// the plain prompt.
+func waitForContinueClick(lookup clickEntry) pagerAction {
+	fmt.Print("-- more (space to continue, return for one line, q to quit; click a thumbnail + space for Quick Look) --")
 	defer fmt.Print("\r\033[K")
 
 	fd := int(os.Stdin.Fd())
@@ -332,26 +333,26 @@ func waitForContinueHover(lookup hoverEntry) pagerAction {
 	defer fmt.Print(mouseTrackingDisable)
 
 	r := newEscReader(os.Stdin)
-	hovered := ""
+	clicked := ""
 	for {
 		kind, key, col, mouseRow := r.next()
 		switch kind {
 		case escEventEOF:
 			return pagerActionPage
-		case escEventMouseMove:
+		case escEventMouseClick:
 			if !haveRow {
 				continue
 			}
 			if path, ok := lookup(promptRow-mouseRow, col); ok {
-				hovered = path
+				clicked = path
 			} else {
-				hovered = ""
+				clicked = "" // clicked elsewhere: deselect
 			}
 		case escEventKey:
 			switch key {
 			case ' ':
-				if hovered != "" {
-					launchQuickLook(hovered)
+				if clicked != "" {
+					launchQuickLook(clicked)
 					continue
 				}
 				return pagerActionPage
@@ -467,7 +468,7 @@ outer:
 		start = end
 
 		for start < n && canPrompt {
-			switch waitForContinue(multiColumnHoverLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, start)) {
+			switch waitForContinue(multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, start)) {
 			case pagerActionQuit:
 				pagerQuit = true
 				return
