@@ -112,6 +112,14 @@ func stripMaclsOnlyOptions(argv []string) []string {
 			// same as maclsOnlyLongOpts' long options.
 			continue
 		}
+		if arg == "-M" {
+			// -M, parseOptions's own shorthand for -I --paging -- unlike
+			// every other single-letter option, real ls(1) has no -M at
+			// all (GNU or BSD), so an -M left in argv would make the
+			// fallback exec itself fail on an option that was never the
+			// actual problem.
+			continue
+		}
 		result = append(result, arg)
 	}
 	return result
@@ -430,6 +438,15 @@ func parseOptions(argv []string) (*Options, []string) {
 				opts.f = true
 			case 'I':
 				opts.i = true
+			case 'M':
+				// Shorthand for -I --paging: --paging's own prompt is
+				// literally "-- more --", so M for "more" reads naturally
+				// as its pairing with -I. Not from the Python original --
+				// like --paging itself, this is Go-port-only, and (unlike
+				// every other single-letter option here) has no meaning
+				// in real ls(1) either, GNU or BSD, to collide with.
+				opts.i = true
+				opts.paging = true
 			case 't':
 				opts.t = true
 			case 'd':
@@ -507,7 +524,7 @@ func execFallback(argv []string, env []string) {
 }
 
 func printHelp() {
-	fmt.Printf(`Usage: %s [-a] [-A] [-l] [-h] [-1] [-C] [-F] [-I] [--scale=n | -n] [--ql-ext=spec] [--paging] [-t] [-S] [-X] [-r] [-d] [-R] [-B] [--color=when] [--theme=mode] [--tag-colors=mode] [--columns=mode] [--tag=mode] [--stripe] [--suffix-color=mode] [--fg-mode=mode] [--base-fg=RRGGBB] [--quote] [--group-directories-first] [--version] [path...]
+	fmt.Printf(`Usage: %s [-a] [-A] [-l] [-h] [-1] [-C] [-F] [-I] [--scale=n | -n] [--ql-ext=spec] [--paging] [-M] [-t] [-S] [-X] [-r] [-d] [-R] [-B] [--color=when] [--theme=mode] [--tag-colors=mode] [--columns=mode] [--tag=mode] [--stripe] [--suffix-color=mode] [--fg-mode=mode] [--base-fg=RRGGBB] [--quote] [--group-directories-first] [--version] [path...]
 
 Options:
   -a        Show all files, including . and ..
@@ -560,6 +577,7 @@ Options:
             Experimental, with -I: clicking a thumbnail at the prompt and
             then pressing space opens it in a real Quick Look window
             instead of advancing -- see README.
+  -M        Shorthand for -I --paging.
   -t        Sort by modification time, newest first
   -S        Sort by file size, largest first
   -X        Sort by extension

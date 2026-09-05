@@ -95,6 +95,11 @@ implements the same CLI surface.
   supported, but this has only been exercised with synthetic escape
   sequences in a sandbox with no real iTerm2, mouse, or Quick Look window
   to check against.
+- **`-M`, shorthand for `-I --paging`, also with no equivalent upstream.**
+  `--paging`'s own prompt is literally `-- more --`, so `-M` ("more")
+  reads as its natural pairing with `-I`. Unlike every other single-letter
+  option here, `-M` has no meaning in real `ls(1)` at all (GNU or BSD) to
+  collide with.
 
 ## Build
 
@@ -121,6 +126,7 @@ alias ls='macls -BF --stripe --suffix-color=type --fg-mode=date --tag=bg --quote
 ./macls -la ~/Desktop
 ./macls -I -1 --scale=2 ~/Pictures
 ./macls -Il2 --ql-ext=md,rtf ~/Documents
+./macls -Ml ~/Documents
 ./macls --stripe --tag=str
 ```
 
