@@ -203,13 +203,29 @@ func jpegPixelSize(data []byte) (int, int, bool) {
 	return 0, 0, false
 }
 
+// maxAspectHeightFactor bounds aspectScaledHeight()'s result to at most
+// this many times the thumbnail's own requested cell width -- e.g. 5 at
+// the default width of 2 cells (--scale=1) caps a thumbnail at 10 rows,
+// scaling up proportionally with --scale=N. Generous for any normal
+// photo's aspect ratio (even a strongly portrait one), while still ruling
+// out a pathological case (an unusually tall, narrow image, or a
+// misidentified non-image file whose peeked "pixel size" isn't really
+// one) from ballooning to dozens of rows -- under --paging specifically,
+// one entry's thumbnail that tall consumes an entire page by itself (see
+// planProgressiveImages()), leaving every other entry to wait for a page
+// that never has room for them either.
+const maxAspectHeightFactor = 5
+
 // aspectScaledHeight computes a thumbnail's height (in cells) from an
 // image's real pixel size, for a given cell width, via CELL_ASPECT_RATIO.
-// Always at least 1.
+// Always at least 1, capped per maxAspectHeightFactor.
 func aspectScaledHeight(width, pxW, pxH int) int {
 	h := int(round(float64(width) * (float64(pxH) / float64(pxW)) / cellAspectRatio))
 	if h < 1 {
 		h = 1
+	}
+	if max := width * maxAspectHeightFactor; h > max {
+		h = max
 	}
 	return h
 }

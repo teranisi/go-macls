@@ -97,6 +97,9 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 			defer func() { <-sem }()
 			if pxW, pxH, ok := peekImagePixelSize(p, ext); ok && pxW > 0 && pxH > 0 {
 				plans[i].height = minInt(aspectScaledHeight(imgWidth, pxW, pxH), termHeight)
+				if debugPagingEnabled() {
+					fmt.Fprintf(os.Stderr, "MACLS_DEBUG_PAGING: entry=%d ext=%s pxW=%d pxH=%d -> height=%d path=%s\n", i, ext, pxW, pxH, plans[i].height, p)
+				}
 			}
 		}(i, p, ext)
 	}
