@@ -28,24 +28,38 @@ type imagePlan struct {
 	hasImage bool
 	height   int  // reserved thumbnail height in rows; meaningless if !hasImage
 	stacked  bool // image goes on its own line below the text, not beside it
+	textRows int  // physical rows this entry's own printed text (plus any
+	// reserved image-column padding) occupies once the
+	// terminal wraps it -- almost always 1; see list.go's own
+	// textRows computation. <1 (the zero value included)
+	// means "1", same as textRowCount() below.
+}
+
+// textRowCount is p.textRows, normalized to its effective minimum of 1.
+func (p imagePlan) textRowCount() int {
+	if p.textRows < 1 {
+		return 1
+	}
+	return p.textRows
 }
 
 // rows is how many terminal rows this entry's text plus reserved thumbnail
-// space together occupy: 1 (just the text) for no image or a 1-row image
-// sharing the text's own row, or more when the thumbnail is taller than 1
-// row (sharing the text's row unless stacked, in which case it's added on
-// top of the text's own row).
+// space together occupy: just the text's own row count for no image or a
+// 1-row image sharing the text's own last row, or more when the thumbnail
+// is taller than that (sharing the text's own last row unless stacked, in
+// which case it's added on top of the text's own row(s)).
 func (p imagePlan) rows() int {
+	textRows := p.textRowCount()
 	if !p.hasImage {
-		return 1
+		return textRows
 	}
 	if p.stacked {
-		return 1 + p.height
+		return textRows + p.height
 	}
-	if p.height > 1 {
+	if p.height > textRows {
 		return p.height
 	}
-	return 1
+	return textRows
 }
 
 // planProgressiveImages decides each entry's reserved thumbnail height by
@@ -53,8 +67,15 @@ func (p imagePlan) rows() int {
 // dimensions (see peekImagePixelSize()) -- fast compared to reading and
 // base64-encoding the whole file, which renderProgressiveImages() defers
 // until after the text listing has already been printed.
-func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight int, stackedFlags []bool, ql qlExtensions) []imagePlan {
+func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight int, stackedFlags []bool, textRows []int, ql qlExtensions) []imagePlan {
 	plans := make([]imagePlan, len(fullPaths))
+	for i := range plans {
+		tr := 1
+		if textRows != nil && i < len(textRows) {
+			tr = textRows[i]
+		}
+		plans[i].textRows = tr
+	}
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	var wg sync.WaitGroup
 	for i, p := range fullPaths {
@@ -66,7 +87,9 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 			continue
 		}
 		stacked := stackedFlags != nil && stackedFlags[i]
-		plans[i] = imagePlan{hasImage: true, height: minInt(imgHeight, termHeight), stacked: stacked}
+		plans[i].hasImage = true
+		plans[i].height = minInt(imgHeight, termHeight)
+		plans[i].stacked = stacked
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(i int, p, ext string) {
@@ -87,6 +110,13 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 // (same as the non-progressive path), and a suffix of bare newlines
 // reserving each entry's thumbnail rows -- no image data yet, so nothing
 // here waits on file I/O.
+//
+// The filler is p.rows() minus the entry's own text row count, not p.rows()
+// minus a flat 1: an entry whose printed line is wide enough to wrap on its
+// own (a long "-> target" on a symlink, say) already gets those extra rows
+// from the terminal's own line wrapping, with no "\n" of ours involved --
+// reserving p.rows()-1 regardless would double up on that entry's own
+// wrapped rows, an extra blank line the terminal never actually needed.
 func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes []string, imgColWidth int) {
 	imgColWidth = imgWidth + 1
 	imgColPad := strings.Repeat(" ", imgColWidth)
@@ -94,7 +124,7 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 	suffixes = make([]string, len(plans))
 	for i, p := range plans {
 		prefixes[i] = imgColPad
-		if filler := p.rows() - 1; filler > 0 {
+		if filler := p.rows() - p.textRowCount(); filler > 0 {
 			suffixes[i] = strings.Repeat("\n", filler)
 		}
 	}
@@ -153,7 +183,7 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 	for _, i := range order {
 		rowsUp := totalRows - starts[i]
 		if plans[i].stacked {
-			rowsUp--
+			rowsUp -= plans[i].textRowCount()
 		}
 		if rowsUp >= termHeight {
 			// Already scrolled off; unreachable without risking

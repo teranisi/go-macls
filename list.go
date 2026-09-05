@@ -370,36 +370,64 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	imgWidth := itermImgWidth * scale
 	imgHeight := itermImgHeight * scale
 
+	// textWidth(i) is entry i's own plain (escape-free) display width -- the
+	// real ls -l line for -l, or the sanitized name (plus -F's own suffix
+	// character) otherwise. Feeds two related but separate things below:
+	// stackedFlags (only meaningful once -I actually reserves a thumbnail
+	// column) and textRows (needed by --paging regardless of -I).
+	var textWidth func(i int) int
+	if opts.l && plainL != nil {
+		entryLines := plainL
+		if len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ") {
+			entryLines = plainL[1:]
+		}
+		textWidth = func(i int) int {
+			idx := i
+			if order != nil {
+				idx = order[i]
+			}
+			if idx < len(entryLines) {
+				return displayWidth(entryLines[idx])
+			}
+			return 0
+		}
+	} else {
+		nameExtra := 0
+		if opts.f {
+			nameExtra = 1
+		}
+		textWidth = func(i int) int {
+			return displayWidth(sanitizedNames[i]) + nameExtra
+		}
+	}
+
 	var stackedFlags []bool
 	if scaleApplies {
-		if opts.l && plainL != nil {
-			entryLines := plainL
-			if len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ") {
-				entryLines = plainL[1:]
-			}
-			textWidth := func(i int) int {
-				idx := i
-				if order != nil {
-					idx = order[i]
-				}
-				if idx < len(entryLines) {
-					return displayWidth(entryLines[idx])
-				}
-				return 0
-			}
-			stackedFlags = make([]bool, len(names))
-			for i := range names {
-				stackedFlags[i] = (imgWidth + textWidth(i)) > termWidth
-			}
-		} else {
-			nameExtra := 0
-			if opts.f {
-				nameExtra = 1
-			}
-			stackedFlags = make([]bool, len(names))
-			for i := range names {
-				stackedFlags[i] = (imgWidth + displayWidth(sanitizedNames[i]) + nameExtra) > termWidth
-			}
+		stackedFlags = make([]bool, len(names))
+		for i := range names {
+			stackedFlags[i] = (imgWidth + textWidth(i)) > termWidth
+		}
+	}
+
+	// textRows[i] is how many physical terminal rows entry i's own printed
+	// line (the reserved image-column padding, if any, plus its text)
+	// occupies once the terminal wraps it -- almost always 1. --paging's
+	// progressive rendering (planProgressiveImages()/
+	// renderProgressiveImages() and friends) places a later entry's
+	// thumbnail by counting rows up from wherever the cursor currently
+	// sits; assuming every entry is exactly 1 row tall, when an unusually
+	// wide line (a long "-> target" on a symlink, say) actually wrapped to
+	// more, would put every later entry's own placement off by however
+	// many extra rows accumulated above it.
+	var textRows []int
+	if opts.paging {
+		pad := 0
+		if scaleApplies {
+			pad = imgWidth + 1 // imgColWidth
+		}
+		textRows = make([]int, len(names))
+		for i := range names {
+			textRows[i] = maxInt(1, ceilDiv(pad+textWidth(i), termWidth))
 		}
 	}
 
@@ -419,10 +447,15 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	switch {
 	case progressive:
 		if opts.i {
-			progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags, ql)
+			progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags, textRows, ql)
 			imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
 		} else {
 			progressivePlans = make([]imagePlan, len(fullPaths))
+			for i := range progressivePlans {
+				if textRows != nil && i < len(textRows) {
+					progressivePlans[i].textRows = textRows[i]
+				}
+			}
 			imgPrefixes = make([]string, len(fullPaths))
 			imgSuffixes = make([]string, len(fullPaths))
 		}
