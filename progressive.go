@@ -317,7 +317,9 @@ func waitForContinuePlain() pagerAction {
 // that selection, and a space with nothing selected behaves exactly like
 // the plain prompt.
 func waitForContinueClick(lookup clickEntry) pagerAction {
-	fmt.Print("-- more (space to continue, return for one line, q to quit; click a thumbnail + space for Quick Look) --")
+	// Same prompt text as the plain (no-thumbnail) prompt -- the
+	// click-to-Quick-Look behavior isn't spelled out here (see README).
+	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
 	defer fmt.Print("\r\033[K")
 
 	fd := int(os.Stdin.Fd())

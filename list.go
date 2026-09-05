@@ -371,7 +371,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	imgHeight := itermImgHeight * scale
 
 	var stackedFlags []bool
-	if scaleApplies && scale > 1 {
+	if scaleApplies {
 		if opts.l && plainL != nil {
 			entryLines := plainL
 			if len(plainL) > 0 && strings.HasPrefix(plainL[0], "total ") {
