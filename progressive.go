@@ -155,10 +155,12 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 // Returns ok=false -- having already printed lines itself, exactly as the
 // old unconditional bulk fmt.Print did -- when canPrompt is false (stdin
 // isn't a terminal; reading it here to await a DSR reply could consume
-// bytes meant for whatever's actually piping data through it) or the
-// terminal never answers DSR at all. The caller then falls back to the
-// plan-based estimate for this page, same as before this function existed.
-func printPageTrackingRows(lines []string, canPrompt bool) (starts []int, total int, ok bool) {
+// bytes meant for whatever's actually piping data through it), the
+// terminal never answers DSR at all, or (see the loop below) a reply
+// looks stale. termHeight is only used for that last check. The caller
+// then falls back to the plan-based estimate for this page, same as
+// before this function existed.
+func printPageTrackingRows(lines []string, canPrompt bool, termHeight int) (starts []int, total int, ok bool) {
 	// "\r\n", not "\n": once raw mode is entered below, OPOST/ONLCR (which
 	// otherwise expands a bare "\n" into "\r\n" for us) is off, so a lone
 	// "\n" would move the cursor down without returning it to column 0,
@@ -196,7 +198,18 @@ func printPageTrackingRows(lines []string, canPrompt bool) (starts []int, total 
 		starts[i] = prev - startRow
 		fmt.Print(line + "\r\n")
 		row, have := queryCursorRow(os.Stdin)
-		if !have {
+		// Every printed line ends in "\r\n", so the cursor must have moved
+		// down by at least one row -- unless it was already sitting on the
+		// terminal's own last row, where a real terminal instead scrolls
+		// the whole screen and leaves the cursor's own (visible-screen,
+		// not buffer) row unchanged. row <= prev anywhere above that last
+		// row means this reply doesn't actually belong to the query just
+		// sent -- a real terminal has, on rare occasion, been observed to
+		// answer a rapid burst of DSRs with a stale or duplicate row from
+		// an earlier one -- so the whole page's worth of tracking is
+		// discarded rather than risk drawing on top of the wrong row from
+		// a single bad reading.
+		if !have || (row <= prev && prev < termHeight) {
 			printAll(lines[i+1:])
 			return nil, 0, false
 		}
@@ -370,7 +383,7 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 	pageRealOK := false
 
 	renderPage := func(start, end int) {
-		starts, totalRows, ok := printPageTrackingRows(entryLines[start:end], canPrompt)
+		starts, totalRows, ok := printPageTrackingRows(entryLines[start:end], canPrompt, termHeight)
 		if !ok {
 			pageRealOK = false
 		} else {
