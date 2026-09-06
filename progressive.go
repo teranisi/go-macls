@@ -20,10 +20,10 @@ import (
 var pagerQuit bool
 
 // imagePlan is the reserved layout for one entry's -I thumbnail in
-// progressive mode (see renderProgressiveImages()): decided from a cheap
-// header peek (see peekImagePixelSize()), before the entry's text is ever
-// printed, so that text output doesn't have to wait for the full image
-// read+encode.
+// progressive mode (see renderProgressiveImages()): decided up front, from
+// termWidth/termHeight and the entry's own textRows alone (see
+// planProgressiveImages()), before the entry's text is ever printed, so
+// that text output doesn't have to wait for the full image read+encode.
 type imagePlan struct {
 	hasImage bool
 	height   int  // reserved thumbnail height in rows; meaningless if !hasImage
@@ -62,23 +62,25 @@ func (p imagePlan) rows() int {
 	return textRows
 }
 
-// planProgressiveImages decides each entry's reserved thumbnail height by
-// peeking at just enough of each image file's header to read its pixel
-// dimensions (see peekImagePixelSize()) -- fast compared to reading and
-// base64-encoding the whole file, which renderProgressiveImages() defers
-// until after the text listing has already been printed.
-func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight int, stackedFlags []bool, textRows []int, ql qlExtensions) []imagePlan {
+// planProgressiveImages decides each entry's reserved thumbnail height --
+// always exactly imgHeight (the same fixed height every --paging thumbnail
+// reserves, regardless of the source image's own aspect ratio: a portrait
+// image ends up letterboxed narrower rather than reserving extra rows for
+// itself, via preserveAspectRatio=1's own "contain" fit -- see
+// buildImagePrefix()). Every entry's reserved row count is therefore
+// knowable up front from termWidth/termHeight and each entry's own
+// textRows alone, with no per-image file read (let alone a header peek at
+// its real pixel dimensions) needed before a page's own row layout can be
+// decided.
+func planProgressiveImages(fullPaths []string, imgHeight, termHeight int, stackedFlags []bool, textRows []int, ql qlExtensions) []imagePlan {
 	plans := make([]imagePlan, len(fullPaths))
-	for i := range plans {
+	height := minInt(imgHeight, termHeight)
+	for i, p := range fullPaths {
 		tr := 1
 		if textRows != nil && i < len(textRows) {
 			tr = textRows[i]
 		}
 		plans[i].textRows = tr
-	}
-	sem := make(chan struct{}, imagePrefixConcurrency)
-	var wg sync.WaitGroup
-	for i, p := range fullPaths {
 		if !isFileFollow(p) {
 			continue
 		}
@@ -86,24 +88,10 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 		if !imageExtensions[ext] && !isQLCandidate(p, ext, ql) {
 			continue
 		}
-		stacked := stackedFlags != nil && stackedFlags[i]
 		plans[i].hasImage = true
-		plans[i].height = minInt(imgHeight, termHeight)
-		plans[i].stacked = stacked
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, p, ext string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if pxW, pxH, ok := peekImagePixelSize(p, ext); ok && pxW > 0 && pxH > 0 {
-				plans[i].height = minInt(aspectScaledHeight(imgWidth, pxW, pxH), termHeight)
-				if debugPagingEnabled() {
-					fmt.Fprintf(os.Stderr, "MACLS_DEBUG_PAGING: entry=%d ext=%s pxW=%d pxH=%d -> height=%d path=%s\n", i, ext, pxW, pxH, plans[i].height, p)
-				}
-			}
-		}(i, p, ext)
+		plans[i].height = height
+		plans[i].stacked = stackedFlags != nil && stackedFlags[i]
 	}
-	wg.Wait()
 	return plans
 }
 
@@ -141,7 +129,10 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 // the cursor up to the entry's reserved row, draws over the blank padding
 // left there, and returns the cursor to where printing left off (DECSC/
 // DECRC, under a mutex so concurrent draws don't interleave their escape
-// sequences).
+// sequences). The thumbnail itself is declared one row shorter than its
+// own reserved height (see drawnIconHeight()), so its own last reserved
+// row is always left blank -- see redrawEntryIcon(), which paints that
+// spare row in reverse video to show a clicked entry's selection.
 //
 // An entry whose reserved row has already scrolled out of the terminal's
 // visible height is skipped outright: ANSI cursor-up can't reach into
@@ -198,7 +189,7 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 		go func(i, rowsUp int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			img := buildImagePrefix(fullPaths[i], imgWidth, plans[i].height, termHeight, false, ql)
+			img := buildImagePrefix(fullPaths[i], imgWidth, drawnIconHeight(plans[i].height), termHeight, false, ql)
 			debugLogImageDraw(i, rowsUp, fullPaths[i], img)
 			if img == "" {
 				return

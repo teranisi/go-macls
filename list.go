@@ -476,7 +476,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 	switch {
 	case progressive:
 		if opts.i {
-			progressivePlans = planProgressiveImages(fullPaths, imgWidth, imgHeight, termHeight, stackedFlags, textRows, ql)
+			progressivePlans = planProgressiveImages(fullPaths, imgHeight, termHeight, stackedFlags, textRows, ql)
 			imgPrefixes, imgSuffixes, imgColWidth = progressiveTextLayout(progressivePlans, imgWidth)
 		} else {
 			progressivePlans = make([]imagePlan, len(fullPaths))

@@ -227,9 +227,10 @@ func parseSGRMouse(seq []byte) (cb, cx, cy int, ok bool) {
 // prompt's own line, which can itself span more than one physical row on
 // a narrow terminal) and col (1-based terminal column) -- to the full
 // path of the thumbnail entry occupying that cell (if any) and a redraw
-// closure (see redrawEntryText()) that re-prints that same entry's own
-// already-on-screen name text with (or without) a highlight, so a click
-// can visibly show which entry is currently selected. Built fresh for
+// closure (see redrawEntryIcon()/redrawEntryText()) that re-paints that
+// same entry's own already-on-screen highlight border (or name text, in
+// multi-column output) with (or without) a highlight, so a click can
+// visibly show which entry is currently selected. Built fresh for
 // each page by printPaginated()/printPaginatedMulti() from the same row/
 // column bookkeeping used to actually draw thumbnails (see
 // renderProgressiveImages()/renderProgressiveMultiImages()).
@@ -305,6 +306,66 @@ func firstLineTextAfterPad(line string, imgColWidth int) string {
 	return line
 }
 
+// drawnIconHeight is the height (in rows) renderProgressiveImages() actually
+// declares for an entry's own thumbnail -- one row less than boxHeight (the
+// full height planProgressiveImages() reserved for it), when boxHeight
+// leaves room to spare one, so the box's own last row is always left
+// blank. redrawEntryIcon() paints that spare row (and the already-blank
+// gap column to the icon's own right -- see imgColWidth) in reverse video
+// to show a clicked entry's selection, without ever touching the icon's
+// own cells: toggling the highlight on or off never needs to re-fetch or
+// re-encode the actual image.
+func drawnIconHeight(boxHeight int) int {
+	if boxHeight > 1 {
+		return boxHeight - 1
+	}
+	return boxHeight
+}
+
+// redrawEntryIcon builds a clickEntry's own redraw closure for one entry's
+// own thumbnail border, whose box starts blockTop rows above wherever the
+// cursor sat right after this page's own content was printed (see
+// redrawEntryText()'s own doc comment for that reference point, and why
+// the caller passes extraRows at call time rather than baking it in here).
+//
+// boxHeight is the full height planProgressiveImages() reserved for this
+// entry's thumbnail; drawnHeight (see drawnIconHeight()) is the shorter
+// height the icon itself was actually declared at. Highlighting paints, in
+// reverse video, the imgWidth..imgColWidth gap column (already always
+// blank -- the spacing before the entry's own name) for every row the icon
+// itself occupies, plus a full imgColWidth-wide row below it for any
+// row(s) boxHeight left spare beyond drawnHeight -- an "L" border around
+// the icon that never overlaps its own cells (nor, on a non-stacked entry
+// sharing its first row with the entry's own name text, that name's own
+// columns, which start at imgColWidth).
+func redrawEntryIcon(blockTop, imgWidth, imgColWidth, drawnHeight, boxHeight int) func(extraRows int, highlight bool) {
+	gapCell, fullRow := " ", strings.Repeat(" ", imgColWidth)
+	return func(extraRows int, highlight bool) {
+		hlGap, hlRow := gapCell, fullRow
+		if highlight {
+			hlGap = "\033[7m \033[0m"
+			hlRow = "\033[7m" + fullRow + "\033[0m"
+		}
+		for row := 0; row < boxHeight; row++ {
+			text, col := hlGap, imgWidth
+			if row >= drawnHeight {
+				text, col = hlRow, 0
+			}
+			rowsUp := blockTop + extraRows - row
+			fmt.Print("\0337") // DECSC: save cursor position
+			if rowsUp > 0 {
+				fmt.Printf("\033[%dA", rowsUp)
+			}
+			fmt.Print("\r")
+			if col > 0 {
+				fmt.Printf("\033[%dC", col)
+			}
+			fmt.Print(text)
+			fmt.Print("\0338") // DECRC: restore cursor position
+		}
+	}
+}
+
 // singleColumnClickLookup builds a clickEntry for printPaginated()'s
 // -1/-l layout: entries [start, end) are the ones currently visible on
 // screen (the page just rendered, plus any single-entry lines added since
@@ -339,8 +400,9 @@ func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, 
 		}
 		for _, sp := range spans {
 			if rowsUp >= sp.lo && rowsUp <= sp.hi {
-				text := firstLineTextAfterPad(entryLines[sp.idx], imgColWidth)
-				return fullPaths[sp.idx], redrawEntryText(sp.hi, imgColWidth, text), true
+				boxHeight := plans[sp.idx].height
+				redraw := redrawEntryIcon(sp.hi, imgWidth, imgColWidth, drawnIconHeight(boxHeight), boxHeight)
+				return fullPaths[sp.idx], redraw, true
 			}
 		}
 		return "", nil, false
