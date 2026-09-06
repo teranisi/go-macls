@@ -534,7 +534,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		if preambleCount > 0 {
 			fmt.Print(strings.Join(output[:preambleCount], "\n") + "\n")
 		}
-		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, fullPaths, imgWidth, termWidth, termHeight, ql)
+		printPaginatedMulti(lines, hasImageMulti, rowOfIdx, colOffsetOfIdx, final, fullPaths, imgWidth, termWidth, termHeight, ql)
 	case opts.l:
 		longLines, matched := renderLongFormat(names, plainL, final, imgPrefixes, opts, isTty, order)
 		output = append(output, longLines...)

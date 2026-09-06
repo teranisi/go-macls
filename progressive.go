@@ -250,6 +250,7 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 		return
 	}
 	entryLines, plans, fullPaths = entryLines[:n], plans[:n], fullPaths[:n]
+	imgColWidth := imgWidth + 1
 
 	pageCapacity := termHeight - pagerPromptRows
 	debugLogPaging(termHeight, pageCapacity, entryLines, plans)
@@ -279,7 +280,7 @@ outer:
 		renderPage(start, i)
 
 		for canPrompt {
-			lookup := singleColumnClickLookup(fullPaths, plans, imgWidth, start, i)
+			lookup := singleColumnClickLookup(fullPaths, entryLines, plans, imgWidth, imgColWidth, start, i)
 			if i >= n && lookup == nil {
 				// Nothing left to page through, and nothing on screen to
 				// click either -- no reason to prompt at all, matching
@@ -395,8 +396,20 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 		setMouseTrackingOn(false)
 	}()
 
-	r := newEscReader(os.Stdin)
 	clicked := ""
+	var highlightOff func(bool)
+	// Whatever's currently highlighted (see redrawEntryText()) has to be
+	// turned back off before this prompt goes away -- the next page (or
+	// this same page's own next prompt) gets printed right where this one
+	// currently sits, and leaving a stray reverse-video row behind under
+	// that would look like display corruption once it does.
+	defer func() {
+		if highlightOff != nil {
+			highlightOff(false)
+		}
+	}()
+
+	r := newEscReader(os.Stdin)
 	for {
 		kind, key, col, mouseRow := r.next()
 		switch kind {
@@ -407,12 +420,21 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 				continue
 			}
 			rowsUp := promptRow - mouseRow
-			path, ok := lookup(rowsUp, col)
-			if ok {
-				clicked = path
-			} else {
-				clicked = "" // clicked elsewhere: deselect
+			path, redraw, ok := lookup(rowsUp, col)
+			if !ok {
+				path = ""
 			}
+			if path == clicked {
+				continue // same entry again, or already deselected
+			}
+			if highlightOff != nil {
+				highlightOff(false)
+			}
+			if ok {
+				redraw(true)
+			}
+			highlightOff = redraw // nil when !ok, clearing it too
+			clicked = path
 		case escEventKey:
 			switch key {
 			case ' ':
@@ -540,12 +562,13 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 // printPaginated()'s wrapped-line entries (see lineRowCounts()). Same
 // final-prompt-even-on-one-page behavior as printPaginated() when
 // anything on screen has a thumbnail -- see its own doc comment.
-func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termWidth, termHeight int, ql qlExtensions) {
+func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, final, fullPaths []string, imgWidth, termWidth, termHeight int, ql qlExtensions) {
 	n := len(lines)
 	if n == 0 {
 		return
 	}
 	lineRows := lineRowCounts(lines, termWidth)
+	imgColWidth := imgWidth + 1
 	pageCapacity := termHeight - pagerPromptRows
 	if pageCapacity < 1 {
 		pageCapacity = 1
@@ -588,7 +611,7 @@ outer:
 		start = end
 
 		for canPrompt {
-			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, lineRows, start)
+			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, final, imgWidth, imgColWidth, lineRows, start)
 			if start >= n && lookup == nil {
 				// Nothing left to page through, and nothing on screen to
 				// click either -- no reason to prompt at all, matching

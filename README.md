@@ -67,8 +67,10 @@ implements the same CLI surface.
   `-I`, clicking a thumbnail at the `-- more --` prompt and then pressing
   space opens that entry in a real Quick Look window (`qlmanage -p`)
   instead of advancing — the prompt keeps waiting at the same page either
-  way, so this doesn't cost you your place in the listing. Clicking
-  elsewhere first deselects it. It turns on xterm-style mouse click
+  way, so this doesn't cost you your place in the listing. The clicked
+  entry's own name is shown in reverse video so it's visible which one is
+  currently selected; clicking elsewhere first deselects it (and un-does
+  the highlight). It turns on xterm-style mouse click
   reporting only for the duration of that one prompt (asking the terminal
   for its cursor position first, via a Device Status Report, to know
   where each entry's own row actually is on screen), so it has no effect

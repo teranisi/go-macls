@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -222,11 +223,71 @@ func parseSGRMouse(seq []byte) (cb, cx, cy int, ok bool) {
 // clickEntry maps a terminal cell -- rowsUp (how many rows above the
 // prompt's own line, 1 = the row directly above it) and col (1-based
 // terminal column) -- to the full path of the thumbnail entry occupying
-// that cell, if any. Built fresh for each page by printPaginated()/
-// printPaginatedMulti() from the same row/column bookkeeping used to
-// actually draw thumbnails (see renderProgressiveImages()/
-// renderProgressiveMultiImages()).
-type clickEntry func(rowsUp, col int) (path string, ok bool)
+// that cell (if any) and a redraw closure that re-prints that same
+// entry's own already-on-screen name text with (or without) a highlight,
+// so a click can visibly show which entry is currently selected. Built
+// fresh for each page by printPaginated()/printPaginatedMulti() from the
+// same row/column bookkeeping used to actually draw thumbnails (see
+// renderProgressiveImages()/renderProgressiveMultiImages()).
+type clickEntry func(rowsUp, col int) (path string, redraw func(highlight bool), ok bool)
+
+// withReverseVideo re-emits s (an entry's own already-colored name/tag
+// text) wrapped in SGR 7 (reverse video), keeping it active throughout
+// even across s's own internal "\033[0m" resets (printed between one
+// colored segment -- a Finder tag, a stripe -- and the next) by
+// reasserting "\033[7m" immediately after each one; a plain wrap alone
+// would have s's own first internal reset cancel the reverse attribute
+// early. Reverse video, rather than a fixed highlight color, adapts
+// automatically to whatever the terminal's actual foreground/background
+// happen to be, light or dark theme alike.
+func withReverseVideo(s string) string {
+	return "\033[7m" + strings.ReplaceAll(s, "\033[0m", "\033[0m\033[7m") + "\033[0m"
+}
+
+// redrawEntryText builds a clickEntry's own redraw closure: jumping the
+// cursor rowsUp rows up and colRight columns right from wherever it
+// currently sits (the "-- more --" prompt's own line -- the same
+// convention rowsUp/col already use for a click itself), reprinting text
+// (or, if highlight, the same text wrapped via withReverseVideo()), then
+// restoring the cursor exactly where it was via DECSC/DECRC, the same as
+// renderProgressiveImages(). text is expected to already exclude the
+// entry's own reserved image-column padding -- colRight is where it
+// starts, right after that padding -- so this never touches, let alone
+// erases, the thumbnail drawn there.
+func redrawEntryText(rowsUp, colRight int, text string) func(highlight bool) {
+	return func(highlight bool) {
+		out := text
+		if highlight {
+			out = withReverseVideo(text)
+		}
+		fmt.Print("\0337") // DECSC: save cursor position
+		if rowsUp > 0 {
+			fmt.Printf("\033[%dA", rowsUp)
+		}
+		fmt.Print("\r")
+		if colRight > 0 {
+			fmt.Printf("\033[%dC", colRight)
+		}
+		fmt.Print(out)
+		fmt.Print("\0338") // DECRC: restore cursor position
+	}
+}
+
+// firstLineTextAfterPad returns line's own first physical line (up to any
+// embedded "\n" -- see progressiveTextLayout()'s filler suffix) with its
+// leading imgColWidth bytes (the entry's own reserved, blank image-column
+// padding -- always plain spaces, never containing an escape sequence, so
+// slicing by byte count is exact) removed, for redrawEntryText()'s own
+// text argument.
+func firstLineTextAfterPad(line string, imgColWidth int) string {
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	if len(line) >= imgColWidth {
+		return line[imgColWidth:]
+	}
+	return line
+}
 
 // singleColumnClickLookup builds a clickEntry for printPaginated()'s
 // -1/-l layout: entries [start, end) are the ones currently visible on
@@ -236,10 +297,13 @@ type clickEntry func(rowsUp, col int) (path string, ok bool)
 // renderProgressiveImages() itself measures rowsUp from wherever the
 // cursor currently sits. A stacked entry's whole block (its own text row
 // plus every image row below it) counts as that entry for click purposes,
-// not just the exact row the image itself draws into. Returns nil if none
-// of [start, end) has a thumbnail at all, so the caller can skip mouse
-// tracking entirely for a page with nothing to click.
-func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, start, end int) clickEntry {
+// not just the exact row the image itself draws into. entryLines is
+// printPaginated()'s own per-entry rendered text (see
+// firstLineTextAfterPad()), imgColWidth its reserved image-column width
+// (imgWidth+1). Returns nil if none of [start, end) has a thumbnail at
+// all, so the caller can skip mouse tracking entirely for a page with
+// nothing to click.
+func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, imgWidth, imgColWidth, start, end int) clickEntry {
 	type span struct{ idx, lo, hi int }
 	var spans []span
 	acc := 0
@@ -253,23 +317,25 @@ func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, st
 	if len(spans) == 0 {
 		return nil
 	}
-	return func(rowsUp, col int) (string, bool) {
+	return func(rowsUp, col int) (string, func(bool), bool) {
 		if col < 1 || col > imgWidth {
-			return "", false
+			return "", nil, false
 		}
 		for _, sp := range spans {
 			if rowsUp >= sp.lo && rowsUp <= sp.hi {
-				return fullPaths[sp.idx], true
+				text := firstLineTextAfterPad(entryLines[sp.idx], imgColWidth)
+				return fullPaths[sp.idx], redrawEntryText(sp.hi, imgColWidth, text), true
 			}
 		}
-		return "", false
+		return "", nil, false
 	}
 }
 
 // multiColumnClickLookup builds a clickEntry for printPaginatedMulti()'s
 // multi-column layout. rowOfIdx/colOffsetOfIdx are the whole listing's own
 // global (not page-relative) line/column bookkeeping, from
-// computeImageCellOffsets(); lineRows is that same listing's per-line
+// computeImageCellOffsets(); final is that same listing's own per-entry
+// rendered text (see firstLineTextAfterPad()), and lineRows its per-line
 // physical row count (see lineRowCounts()) -- almost always 1, except a
 // line holding one oversized entry alone, which wraps to more than one
 // physical row on its own, same as printPaginated()'s wrapped-line
@@ -283,7 +349,7 @@ func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, st
 // singleColumnClickLookup() does per entry -- a line's own wrapped
 // continuation rows count as that line for click purposes, not just its
 // first physical row (the only one an image can actually sit on).
-func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth int, lineRows []int, visibleLines int) clickEntry {
+func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, final []string, imgWidth, imgColWidth int, lineRows []int, visibleLines int) clickEntry {
 	any := false
 	for i := range fullPaths {
 		if hasImage[i] && rowOfIdx[i] < visibleLines {
@@ -305,19 +371,19 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 		spans = append(spans, lineSpan{line: line, lo: acc + 1, hi: acc + r})
 		acc += r
 	}
-	return func(rowsUp, col int) (string, bool) {
+	return func(rowsUp, col int) (string, func(bool), bool) {
 		if rowsUp < 1 {
-			return "", false
+			return "", nil, false
 		}
-		targetLine := -1
+		targetLine, targetHi := -1, 0
 		for _, sp := range spans {
 			if rowsUp >= sp.lo && rowsUp <= sp.hi {
-				targetLine = sp.line
+				targetLine, targetHi = sp.line, sp.hi
 				break
 			}
 		}
 		if targetLine < 0 {
-			return "", false
+			return "", nil, false
 		}
 		for i := range fullPaths {
 			if !hasImage[i] || rowOfIdx[i] != targetLine {
@@ -328,9 +394,11 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 			if col < lo || col > hi {
 				continue
 			}
-			return fullPaths[i], true
+			text := firstLineTextAfterPad(final[i], imgColWidth)
+			colRight := colOffsetOfIdx[i] + imgColWidth
+			return fullPaths[i], redrawEntryText(targetHi, colRight, text), true
 		}
-		return "", false
+		return "", nil, false
 	}
 }
 
