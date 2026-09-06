@@ -375,11 +375,6 @@ func waitForContinuePlain() pagerAction {
 // that selection, and a space with nothing selected behaves exactly like
 // the plain prompt.
 func waitForContinueClick(lookup clickEntry) pagerAction {
-	// Same prompt text as the plain (no-thumbnail) prompt -- the
-	// click-to-Quick-Look behavior isn't spelled out here (see README).
-	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
-	defer fmt.Print("\r\033[K")
-
 	fd := int(os.Stdin.Fd())
 	oldState, err := enterRawMode(fd)
 	if err != nil {
@@ -387,7 +382,30 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	}
 	defer exitRawMode(fd, oldState)
 
-	promptRow, haveRow := queryCursorRow(os.Stdin)
+	// Queried before the prompt text below, so it reflects wherever the
+	// cursor sat right after this page's own content was printed --
+	// clickEntry's own rowsUp/redraw reference point (see its doc
+	// comment) -- rather than the prompt's own line, which can itself
+	// wrap to more than one physical row on a narrow terminal.
+	contentEndRow, haveContentRow := queryCursorRow(os.Stdin)
+
+	// Same prompt text as the plain (no-thumbnail) prompt -- the
+	// click-to-Quick-Look behavior isn't spelled out here (see README).
+	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
+	defer fmt.Print("\r\033[K")
+
+	promptRow, havePromptRow := queryCursorRow(os.Stdin)
+	haveRow := haveContentRow && havePromptRow
+	// How many rows the prompt just printed above actually wrapped into,
+	// beyond contentEndRow -- 0 on any terminal wide enough for it to fit
+	// on one line. redrawEntryText()'s own closures need this at call
+	// time (now, not when lookup itself was built, before the prompt was
+	// printed) to convert their own contentEndRow-relative position into
+	// an actual jump from wherever the cursor currently sits.
+	extraRows := 0
+	if haveRow {
+		extraRows = promptRow - contentEndRow
+	}
 
 	fmt.Print(mouseTrackingEnable)
 	setMouseTrackingOn(true)
@@ -397,7 +415,7 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	}()
 
 	clicked := ""
-	var highlightOff func(bool)
+	var highlightOff func(int, bool)
 	// Whatever's currently highlighted (see redrawEntryText()) has to be
 	// turned back off before this prompt goes away -- the next page (or
 	// this same page's own next prompt) gets printed right where this one
@@ -405,7 +423,7 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	// that would look like display corruption once it does.
 	defer func() {
 		if highlightOff != nil {
-			highlightOff(false)
+			highlightOff(extraRows, false)
 		}
 	}()
 
@@ -419,7 +437,7 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 			if !haveRow {
 				continue
 			}
-			rowsUp := promptRow - mouseRow
+			rowsUp := contentEndRow - mouseRow
 			path, redraw, ok := lookup(rowsUp, col)
 			if !ok {
 				path = ""
@@ -428,10 +446,10 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 				continue // same entry again, or already deselected
 			}
 			if highlightOff != nil {
-				highlightOff(false)
+				highlightOff(extraRows, false)
 			}
 			if ok {
-				redraw(true)
+				redraw(extraRows, true)
 			}
 			highlightOff = redraw // nil when !ok, clearing it too
 			clicked = path

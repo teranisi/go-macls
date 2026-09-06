@@ -220,16 +220,20 @@ func parseSGRMouse(seq []byte) (cb, cx, cy int, ok bool) {
 	return cb, cx, cy, true
 }
 
-// clickEntry maps a terminal cell -- rowsUp (how many rows above the
-// prompt's own line, 1 = the row directly above it) and col (1-based
-// terminal column) -- to the full path of the thumbnail entry occupying
-// that cell (if any) and a redraw closure that re-prints that same
-// entry's own already-on-screen name text with (or without) a highlight,
-// so a click can visibly show which entry is currently selected. Built
-// fresh for each page by printPaginated()/printPaginatedMulti() from the
-// same row/column bookkeeping used to actually draw thumbnails (see
+// clickEntry maps a terminal cell -- rowsUp (how many rows above
+// wherever the cursor sat right after this page's own content was
+// printed, before the "-- more --" prompt itself; see
+// waitForContinueClick()'s contentEndRow -- deliberately not the
+// prompt's own line, which can itself span more than one physical row on
+// a narrow terminal) and col (1-based terminal column) -- to the full
+// path of the thumbnail entry occupying that cell (if any) and a redraw
+// closure (see redrawEntryText()) that re-prints that same entry's own
+// already-on-screen name text with (or without) a highlight, so a click
+// can visibly show which entry is currently selected. Built fresh for
+// each page by printPaginated()/printPaginatedMulti() from the same row/
+// column bookkeeping used to actually draw thumbnails (see
 // renderProgressiveImages()/renderProgressiveMultiImages()).
-type clickEntry func(rowsUp, col int) (path string, redraw func(highlight bool), ok bool)
+type clickEntry func(rowsUp, col int) (path string, redraw func(extraRows int, highlight bool), ok bool)
 
 // withReverseVideo re-emits s (an entry's own already-colored name/tag
 // text) wrapped in SGR 7 (reverse video), keeping it active throughout
@@ -244,22 +248,34 @@ func withReverseVideo(s string) string {
 	return "\033[7m" + strings.ReplaceAll(s, "\033[0m", "\033[0m\033[7m") + "\033[0m"
 }
 
-// redrawEntryText builds a clickEntry's own redraw closure: jumping the
-// cursor rowsUp rows up and colRight columns right from wherever it
-// currently sits (the "-- more --" prompt's own line -- the same
-// convention rowsUp/col already use for a click itself), reprinting text
-// (or, if highlight, the same text wrapped via withReverseVideo()), then
-// restoring the cursor exactly where it was via DECSC/DECRC, the same as
-// renderProgressiveImages(). text is expected to already exclude the
-// entry's own reserved image-column padding -- colRight is where it
-// starts, right after that padding -- so this never touches, let alone
-// erases, the thumbnail drawn there.
-func redrawEntryText(rowsUp, colRight int, text string) func(highlight bool) {
-	return func(highlight bool) {
+// redrawEntryText builds a clickEntry's own redraw closure for one
+// entry's own name/tag text, whose block starts blockTop rows above
+// wherever the cursor sat right after this page's own content was
+// printed, before the "-- more --" prompt itself (see
+// waitForContinueClick()'s contentEndRow) -- the same reference point
+// rowsUp/col already use for resolving a click in the first place, and
+// deliberately not the cursor's current position: the prompt text can
+// itself wrap to more than one physical row on a narrow enough terminal,
+// and that row count isn't known yet when this closure is built (before
+// the prompt has even been printed for this particular display of it).
+// So the caller instead passes extraRows -- however many additional rows
+// separate the cursor's current position from that same reference point
+// -- at call time, once it does know it.
+//
+// Jumps the cursor blockTop+extraRows rows up and colRight columns right,
+// reprinting text (or, if highlight, the same text wrapped via
+// withReverseVideo()), then restoring the cursor exactly where it was via
+// DECSC/DECRC, the same as renderProgressiveImages(). text is expected to
+// already exclude the entry's own reserved image-column padding --
+// colRight is where it starts, right after that padding -- so this never
+// touches, let alone erases, the thumbnail drawn there.
+func redrawEntryText(blockTop, colRight int, text string) func(extraRows int, highlight bool) {
+	return func(extraRows int, highlight bool) {
 		out := text
 		if highlight {
 			out = withReverseVideo(text)
 		}
+		rowsUp := blockTop + extraRows
 		fmt.Print("\0337") // DECSC: save cursor position
 		if rowsUp > 0 {
 			fmt.Printf("\033[%dA", rowsUp)
@@ -317,7 +333,7 @@ func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, 
 	if len(spans) == 0 {
 		return nil
 	}
-	return func(rowsUp, col int) (string, func(bool), bool) {
+	return func(rowsUp, col int) (string, func(int, bool), bool) {
 		if col < 1 || col > imgWidth {
 			return "", nil, false
 		}
@@ -371,7 +387,7 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 		spans = append(spans, lineSpan{line: line, lo: acc + 1, hi: acc + r})
 		acc += r
 	}
-	return func(rowsUp, col int) (string, func(bool), bool) {
+	return func(rowsUp, col int) (string, func(int, bool), bool) {
 		if rowsUp < 1 {
 			return "", nil, false
 		}
