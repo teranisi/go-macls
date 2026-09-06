@@ -134,90 +134,6 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 	return prefixes, suffixes, imgColWidth
 }
 
-// printPageTrackingRows prints lines (one page's worth of already-rendered
-// entry text, one entry per element -- see printPaginated()) one at a time,
-// querying the terminal's real cursor row (DSR, see queryCursorRow()) after
-// each so every entry's actual physical row count is known exactly, rather
-// than estimated from displayWidth()/ceilDiv() (see list.go's own textRows
-// computation).
-//
-// That estimate can disagree with how the real terminal actually wraps a
-// specific line -- a wide-character classification mismatch for some
-// script or punctuation range, say -- and renderProgressiveImages() places
-// every entry's thumbnail by counting rows up from wherever the cursor
-// finally ends up once the whole page is printed: a single misestimated
-// line anywhere on the page throws off that count for itself and for every
-// entry printed before it, even though their own row counts were each
-// individually predicted correctly. Ground-truthing every entry's row
-// count via DSR instead removes the estimate from the equation entirely,
-// for whatever reason it might have been wrong.
-//
-// Returns ok=false -- having already printed lines itself, exactly as the
-// old unconditional bulk fmt.Print did -- when canPrompt is false (stdin
-// isn't a terminal; reading it here to await a DSR reply could consume
-// bytes meant for whatever's actually piping data through it), the
-// terminal never answers DSR at all, or (see the loop below) a reply
-// looks stale. termHeight is only used for that last check. The caller
-// then falls back to the plan-based estimate for this page, same as
-// before this function existed.
-func printPageTrackingRows(lines []string, canPrompt bool, termHeight int) (starts []int, total int, ok bool) {
-	// "\r\n", not "\n": once raw mode is entered below, OPOST/ONLCR (which
-	// otherwise expands a bare "\n" into "\r\n" for us) is off, so a lone
-	// "\n" would move the cursor down without returning it to column 0,
-	// leaking each line's own indentation into the next. Harmless in
-	// cooked mode too (ONLCR still expands the "\n" half; the extra "\r"
-	// is a no-op), so this is safe in every path below, not just the ones
-	// already past enterRawMode().
-	printAll := func(ls []string) {
-		if len(ls) > 0 {
-			fmt.Print(strings.Join(ls, "\r\n") + "\r\n")
-		}
-	}
-	if !canPrompt || len(lines) == 0 {
-		printAll(lines)
-		return nil, 0, false
-	}
-
-	fd := int(os.Stdin.Fd())
-	oldState, err := enterRawMode(fd)
-	if err != nil {
-		printAll(lines)
-		return nil, 0, false
-	}
-	defer exitRawMode(fd, oldState)
-
-	startRow, haveStart := queryCursorRow(os.Stdin)
-	if !haveStart {
-		printAll(lines)
-		return nil, 0, false
-	}
-
-	starts = make([]int, len(lines))
-	prev := startRow
-	for i, line := range lines {
-		starts[i] = prev - startRow
-		fmt.Print(line + "\r\n")
-		row, have := queryCursorRow(os.Stdin)
-		// Every printed line ends in "\r\n", so the cursor must have moved
-		// down by at least one row -- unless it was already sitting on the
-		// terminal's own last row, where a real terminal instead scrolls
-		// the whole screen and leaves the cursor's own (visible-screen,
-		// not buffer) row unchanged. row <= prev anywhere above that last
-		// row means this reply doesn't actually belong to the query just
-		// sent -- a real terminal has, on rare occasion, been observed to
-		// answer a rapid burst of DSRs with a stale or duplicate row from
-		// an earlier one -- so the whole page's worth of tracking is
-		// discarded rather than risk drawing on top of the wrong row from
-		// a single bad reading.
-		if !have || (row <= prev && prev < termHeight) {
-			printAll(lines[i+1:])
-			return nil, 0, false
-		}
-		prev = row
-	}
-	return starts, prev - startRow, true
-}
-
 // renderProgressiveImages draws each entry's thumbnail into the rows
 // progressiveTextLayout() already reserved for it, after that text has
 // been printed: it reads and base64-encodes the actual image file (the
@@ -238,18 +154,12 @@ func printPageTrackingRows(lines []string, canPrompt bool, termHeight int) (star
 // without this, each entry's own save/jump/draw/restore is visibly
 // distracting -- the cursor appears to hop around the screen as thumbnails
 // land -- even though the final result is correct either way.
-//
-// starts/totalRows, when non-nil, are printPageTrackingRows()'s own
-// ground-truthed per-entry row offsets and page-total row count, used in
-// place of summing plans[i].rows() -- see its own doc comment for why.
-func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, termHeight int, ql qlExtensions, starts []int, totalRows int) {
-	if starts == nil {
-		starts = make([]int, len(plans))
-		totalRows = 0
-		for i, p := range plans {
-			starts[i] = totalRows
-			totalRows += p.rows()
-		}
+func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, termHeight int, ql qlExtensions) {
+	starts := make([]int, len(plans))
+	totalRows := 0
+	for i, p := range plans {
+		starts[i] = totalRows
+		totalRows += p.rows()
 	}
 
 	var order []int
@@ -270,29 +180,13 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 		setCursorHidden(false)
 	}()
 
-	// realRows is entry i's own actual row count -- from starts/totalRows,
-	// real or plan-based fallback alike (see above), rather than
-	// plans[i].rows() directly, so a stacked entry's own textRowCount below
-	// comes from the same ground truth as everything else here: entry i's
-	// own text can wrap differently from planned without anything past it
-	// in the page being affected (see renderProgressiveImages()'s own doc
-	// comment), but that still leaves its own block's internal split
-	// between text rows and the image row(s) below them to get right.
-	realRows := func(i int) int {
-		next := totalRows
-		if i+1 < len(starts) {
-			next = starts[i+1]
-		}
-		return next - starts[i]
-	}
-
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	for _, i := range order {
 		rowsUp := totalRows - starts[i]
 		if plans[i].stacked {
-			rowsUp -= realRows(i) - plans[i].height
+			rowsUp -= plans[i].textRowCount()
 		}
 		if rowsUp >= termHeight {
 			// Already scrolled off; unreachable without risking
@@ -366,45 +260,15 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 	}
 	canPrompt := term.IsTerminal(int(os.Stdin.Fd()))
 
-	// pageRealStarts/pageRealTotal are printPageTrackingRows()'s own
-	// ground-truthed row offsets, accumulated across every renderPage()
-	// call for the current page (the initial multi-entry render plus any
-	// single-entry appends from a return/line advance below) -- reset for
-	// each new page (see the "outer" loop) since a page's own rowsUp
-	// reference point (wherever the cursor sits once that page's content
-	// is printed) starts over there too. pageRealOK turns false, for the
-	// rest of the current page, the moment any one of those calls falls
-	// back to the plan-based estimate (stdin isn't a terminal, or the
-	// terminal never answered DSR) -- singleColumnClickLookup() needs
-	// every entry's offset in the same terms (real or estimated), not a
-	// mix of both.
-	var pageRealStarts []int
-	pageRealTotal := 0
-	pageRealOK := false
-
 	renderPage := func(start, end int) {
-		starts, totalRows, ok := printPageTrackingRows(entryLines[start:end], canPrompt, termHeight)
-		if !ok {
-			pageRealOK = false
-		} else {
-			for k, s := range starts {
-				pageRealStarts[start+k] = pageRealTotal + s
-			}
-			pageRealTotal += totalRows
-		}
-		if !ok {
-			starts, totalRows = nil, 0
-		}
-		renderProgressiveImages(fullPaths[start:end], plans[start:end], imgWidth, termHeight, ql, starts, totalRows)
+		fmt.Print(strings.Join(entryLines[start:end], "\n") + "\n")
+		renderProgressiveImages(fullPaths[start:end], plans[start:end], imgWidth, termHeight, ql)
 	}
 
 	i := 0
 outer:
 	for i < n {
 		start := i
-		pageRealStarts = make([]int, n)
-		pageRealTotal = 0
-		pageRealOK = true
 		rows := 0
 		for i < n {
 			r := plans[i].rows()
@@ -417,12 +281,7 @@ outer:
 		renderPage(start, i)
 
 		for canPrompt {
-			var lookup clickEntry
-			if pageRealOK {
-				lookup = singleColumnClickLookup(fullPaths, entryLines, plans, imgWidth, imgColWidth, start, i, pageRealStarts, pageRealTotal)
-			} else {
-				lookup = singleColumnClickLookup(fullPaths, entryLines, plans, imgWidth, imgColWidth, start, i, nil, 0)
-			}
+			lookup := singleColumnClickLookup(fullPaths, entryLines, plans, imgWidth, imgColWidth, start, i)
 			if i >= n && lookup == nil {
 				// Nothing left to page through, and nothing on screen to
 				// click either -- no reason to prompt at all, matching

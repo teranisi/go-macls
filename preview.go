@@ -319,39 +319,16 @@ func firstLineTextAfterPad(line string, imgColWidth int) string {
 // (imgWidth+1). Returns nil if none of [start, end) has a thumbnail at
 // all, so the caller can skip mouse tracking entirely for a page with
 // nothing to click.
-//
-// realStarts/realTotal, when non-nil, are printPageTrackingRows()'s own
-// ground-truthed row offsets for entries [start, end) (accumulated across
-// every renderPage() call for the current page -- see printPaginated()),
-// used in place of summing plans[i].rows(), same rationale as
-// renderProgressiveImages()'s own starts/totalRows parameters: an entry
-// whose real wrap differs from its plan would otherwise throw off which
-// entry a click's row actually lands on, the same way it would throw off
-// where that entry's own thumbnail gets drawn.
-func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, imgWidth, imgColWidth, start, end int, realStarts []int, realTotal int) clickEntry {
+func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, imgWidth, imgColWidth, start, end int) clickEntry {
 	type span struct{ idx, lo, hi int }
 	var spans []span
-	if realStarts != nil {
-		for i := end - 1; i >= start; i-- {
-			hi := realTotal - realStarts[i]
-			nextStart := realTotal
-			if i+1 < end {
-				nextStart = realStarts[i+1]
-			}
-			lo := realTotal - nextStart + 1
-			if plans[i].hasImage {
-				spans = append(spans, span{idx: i, lo: lo, hi: hi})
-			}
+	acc := 0
+	for i := end - 1; i >= start; i-- {
+		r := plans[i].rows()
+		if plans[i].hasImage {
+			spans = append(spans, span{idx: i, lo: acc + 1, hi: acc + r})
 		}
-	} else {
-		acc := 0
-		for i := end - 1; i >= start; i-- {
-			r := plans[i].rows()
-			if plans[i].hasImage {
-				spans = append(spans, span{idx: i, lo: acc + 1, hi: acc + r})
-			}
-			acc += r
-		}
+		acc += r
 	}
 	if len(spans) == 0 {
 		return nil
