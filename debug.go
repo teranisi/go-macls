@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // debugPagingEnabled gates debugLogPaging()'s diagnostic output on the
@@ -38,4 +39,27 @@ func debugLogPaging(termHeight, pageCapacity int, entryLines []string, plans []i
 		fmt.Fprintf(os.Stderr, "  [%d] textRows=%d height=%d hasImage=%v stacked=%v rows()=%d line=%q\n",
 			i, p.textRows, p.height, p.hasImage, p.stacked, p.rows(), line)
 	}
+}
+
+// debugLogImageDraw prints, to standard error, exactly what
+// renderProgressiveImages() is about to send for one entry's thumbnail --
+// the cursor jump (rowsUp) and the OSC 1337 escape sequence's own
+// declared width/height/size parameters (parsed back out of img, the
+// string buildImagePrefix() returned) -- temporary instrumentation for
+// the same real-world --paging report debugLogPaging() exists for,
+// specifically the part it can't see: what actually gets sent for the
+// image itself, as opposed to the plan for its reserved rows.
+func debugLogImageDraw(i, rowsUp int, path, img string) {
+	if !debugPagingEnabled() {
+		return
+	}
+	if img == "" {
+		fmt.Fprintf(os.Stderr, "MACLS_DEBUG_PAGING: draw entry=%d rowsUp=%d path=%s img=EMPTY\n", i, rowsUp, path)
+		return
+	}
+	params := "?"
+	if start := strings.IndexByte(img, ':'); start > 0 && start < 200 {
+		params = img[:start]
+	}
+	fmt.Fprintf(os.Stderr, "MACLS_DEBUG_PAGING: draw entry=%d rowsUp=%d path=%s params=%s\n", i, rowsUp, path, params)
 }

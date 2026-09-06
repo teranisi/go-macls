@@ -199,6 +199,7 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 			defer wg.Done()
 			defer func() { <-sem }()
 			img := buildImagePrefix(fullPaths[i], imgWidth, plans[i].height, termHeight, false, ql)
+			debugLogImageDraw(i, rowsUp, fullPaths[i], img)
 			if img == "" {
 				return
 			}
