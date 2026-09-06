@@ -109,8 +109,13 @@ type entryMeta struct {
 }
 
 // buildEntries computes each entry's pre-color display metadata, before
-// the multi-column layout is computed.
-func buildEntries(names, fullPaths, sanitizedNames []string, needsQuote, ansiCNeeded []bool, anyQuoted bool, opts *Options, imgColWidth int) entryMeta {
+// the multi-column layout is computed. te is fullPaths' own Finder-tag
+// lookup (see computeTagExtras()), computed by the caller before this
+// runs -- listTarget()'s own textWidth() needs the exact same per-entry
+// tag width this bakes into dispLen, before -I's own reserved thumbnail
+// column width (imgColWidth) is even known, let alone this function
+// itself is called.
+func buildEntries(names, fullPaths, sanitizedNames []string, needsQuote, ansiCNeeded []bool, anyQuoted bool, opts *Options, imgColWidth int, te tagExtras) entryMeta {
 	n := len(names)
 	m := entryMeta{
 		dispNames:    make([]string, n),
@@ -122,12 +127,6 @@ func buildEntries(names, fullPaths, sanitizedNames []string, needsQuote, ansiCNe
 		entryTags:    make([][]finderTag, n),
 		namelen:      make([]int, n),
 		plainlen:     make([]int, n),
-	}
-
-	var tagLookups []tagLookup
-	needTags := opts.tag != "off" && (opts.useColor || opts.tag == "str")
-	if needTags {
-		tagLookups = fetchTagLookups(fullPaths, opts.tag)
 	}
 
 	for i := range names {
@@ -147,30 +146,14 @@ func buildEntries(names, fullPaths, sanitizedNames []string, needsQuote, ansiCNe
 		}
 		isDirectory := isDir(p)
 
-		var bgNum *int
-		var dotTagnums []int
-		var tags []finderTag
-		tagExtra := 0
-		if needTags {
-			lookup := tagLookups[i]
-			bgNum, dotTagnums = lookup.bgNum, lookup.dotTagnums
-			if !opts.useColor {
-				bgNum, dotTagnums = nil, nil
-			}
-			if opts.tag == "str" {
-				tags = lookup.allTags
-				_, tagExtra = buildTagLabel(tags, false, opts.useTruecolor, opts.tagColors, "")
-			}
-		}
-
-		dispLen := len(hangPrefix) + displayWidth(dispName) + len(suffix) + dotExtraWidth(dotTagnums) + tagExtra + imgColWidth
+		dispLen := len(hangPrefix) + displayWidth(dispName) + len(suffix) + te.extraWidth[i] + imgColWidth
 		m.dispNames[i] = dispName
 		m.hangPrefixes[i] = hangPrefix
 		m.suffixes[i] = suffix
 		m.isDirs[i] = isDirectory
-		m.bgNums[i] = bgNum
-		m.dotTagnums[i] = dotTagnums
-		m.entryTags[i] = tags
+		m.bgNums[i] = te.bgNums[i]
+		m.dotTagnums[i] = te.dotTagnums[i]
+		m.entryTags[i] = te.tags[i]
 		m.namelen[i] = dispLen
 		m.plainlen[i] = dispLen
 	}
@@ -385,6 +368,13 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 
 	sanitizedNames, needsQuote, ansiCNeeded, anyQuoted := computeQuoting(names, opts.quote, isTty)
 
+	// Computed early -- before imgColWidth is even known, let alone
+	// buildEntries() itself runs -- since textWidth() below needs the same
+	// per-entry tag width buildEntries()'s own dispLen bakes in; passed
+	// through to buildEntries() later so the underlying tag lookup
+	// (fetchTagLookups(), a per-file syscall) only runs once.
+	tagInfo := computeTagExtras(fullPaths, opts)
+
 	var plainL []string
 	if opts.l {
 		plainL = runLs([]string{"-l"}, lsFlags, paths)
@@ -418,10 +408,17 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 			if order != nil {
 				idx = order[i]
 			}
+			w := 0
 			if idx < len(entryLines) {
-				return displayWidth(entryLines[idx])
+				w = displayWidth(entryLines[idx])
 			}
-			return 0
+			// entryLines[idx] is the real, plain ls -l line -- it knows
+			// nothing about a Finder tag's own dots/label, spliced in
+			// after the name (see renderLongFormat()/buildFinalEntries()),
+			// which the real printed line does end up wider by. tagInfo
+			// is indexed by i (this entry's own position, matching
+			// fullPaths/names below), not idx (plainL's ls-order position).
+			return w + tagInfo.extraWidth[i]
 		}
 	} else {
 		nameExtra := 0
@@ -429,7 +426,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 			nameExtra = 1
 		}
 		textWidth = func(i int) int {
-			return displayWidth(sanitizedNames[i]) + nameExtra
+			return displayWidth(sanitizedNames[i]) + nameExtra + tagInfo.extraWidth[i]
 		}
 	}
 
@@ -507,7 +504,7 @@ func listTarget(mode string, showHeader bool, paths []string, opts *Options) {
 		imgPrefixes, imgSuffixes, imgColWidth = buildImagePrefixes(fullPaths, opts.i, imgWidth, imgHeight, stackedFlags, scaleApplies, ql)
 	}
 
-	m := buildEntries(names, fullPaths, sanitizedNames, needsQuote, ansiCNeeded, anyQuoted, opts, imgColWidth)
+	m := buildEntries(names, fullPaths, sanitizedNames, needsQuote, ansiCNeeded, anyQuoted, opts, imgColWidth, tagInfo)
 
 	effectiveStripe := opts.stripe && opts.useColor
 
