@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -477,12 +478,29 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 	}
 }
 
+// qlProcessMu guards qlProcess, the most recently started qlmanage -p (see
+// launchQuickLook()) -- a package-level, not per-prompt or per-page,
+// variable: Finder's own Quick Look panel is a single window that swaps to
+// whatever's newly selected regardless of which folder that happens in,
+// and launchQuickLook() matches that by tracking across the whole run,
+// not just the current --paging prompt.
+var (
+	qlProcessMu sync.Mutex
+	qlProcess   *os.Process
+)
+
 // launchQuickLook opens path in macOS's own Quick Look panel via
 // qlmanage -p -- a real GUI window, independent of and in addition to
 // whatever -I has already drawn inline. Started detached (not waited on
 // inline) so it doesn't block the pager's own input loop; the goroutine
 // just reaps the child once its window is closed to avoid a zombie
 // process. No-ops if qlmanage isn't on PATH (e.g. not running on macOS).
+//
+// Killing whatever qlmanage -p this function itself last started, right
+// before starting the new one, matches Finder's own Quick Look behavior:
+// selecting a different file swaps the same panel to it rather than
+// opening a second one alongside the first. Never touches a qlmanage
+// process this function didn't start itself.
 //
 // See this file's own top-of-file comment: qlmanage -p has been observed,
 // on a real machine, to wedge the shared QuickLook service badly enough to
@@ -493,11 +511,20 @@ func launchQuickLook(path string) {
 	if err != nil {
 		return
 	}
+
+	qlProcessMu.Lock()
+	defer qlProcessMu.Unlock()
+	if qlProcess != nil {
+		qlProcess.Kill()
+		qlProcess = nil
+	}
+
 	cmd := exec.Command(qlPath, "-p", path)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		return
 	}
+	qlProcess = cmd.Process
 	go cmd.Wait()
 }
