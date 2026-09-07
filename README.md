@@ -48,9 +48,12 @@ implements the same CLI surface.
   `--paging` isn't only about `-I`, though: whenever the listing doesn't
   fit on one screen, it pauses after each screenful with a `more(1)`-style
   prompt — a bare `:`, same as `less`'s own default — whether or not `-I`
-  is active: space advances to the next full page, return advances just
-  one more line (holding it down steps through the listing one line at a
-  time, same as `more`/`less`), and `q` (also Ctrl-C or Esc) stops early.
+  is active. Forward-only, matching `less`'s own key bindings for
+  everything it supports going forward (there's no way back to an earlier
+  page): space (or `f`, Ctrl-F) advances a full page; return (or `e`,
+  Ctrl-E, `j`) advances just one more line (holding it down steps through
+  the listing one line at a time); `G` prints the rest of the listing
+  without pausing again; `q` (also Ctrl-C or Esc) stops early.
   With `-I`, this is also what guarantees every thumbnail you scroll back to
   was actually drawn: a thumbnail can only be drawn into a row that's
   still on screen, so a page never holds more rows than the terminal can
