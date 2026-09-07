@@ -260,11 +260,13 @@ const pagerPromptRows = 1
 //
 // When there's more than one page and standard input is a terminal, it
 // pauses after each page but the last with a pagerPrompt prompt (see
-// waitForContinue()): space advances a full page, return advances a single
-// entry (then prompts again, so holding return steps through the listing
-// one entry at a time); otherwise (input isn't interactive) it just keeps
-// going without pausing, matching how a non-interactive pager falls back to
-// a plain dump rather than hanging. Even a listing that fits on one screen
+// waitForContinue() for the full set of less(1)-style keys it takes):
+// space advances a full page, return advances a single entry (then
+// prompts again, so holding return steps through the listing one entry
+// at a time), and G prints the rest without pausing again; otherwise
+// (input isn't interactive) it just keeps going without pausing, matching
+// how a non-interactive pager falls back to a plain dump rather than
+// hanging. Even a listing that fits on one screen
 // still gets this same final prompt if anything on it has a thumbnail --
 // clicking one there and pressing space still opens Quick Look (see
 // preview.go) -- but not otherwise, matching this function's own pre-
@@ -327,6 +329,14 @@ outer:
 					// advance below, just finish.
 					continue outer
 				}
+			case pagerActionEnd:
+				// canPrompt false from here on makes the outer loop's own
+				// "for canPrompt" below a no-op for every remaining page,
+				// so it just renders each one back-to-back with no further
+				// pause -- the same fallback already in place when stdin
+				// isn't a terminal at all.
+				canPrompt = false
+				continue outer
 			default: // pagerActionPage
 				continue outer
 			}
@@ -339,18 +349,25 @@ outer:
 type pagerAction int
 
 const (
-	pagerActionPage pagerAction = iota // space: a full page
-	pagerActionLine                    // return: a single line/entry
+	pagerActionPage pagerAction = iota // space/f/Ctrl-F: a full page
+	pagerActionLine                    // return/e/Ctrl-E/j: a single line/entry
+	pagerActionEnd                     // G: the rest of the listing, unpaginated
 	pagerActionQuit                    // q, Ctrl-C, Esc
 )
 
 // waitForContinue prints pagerPrompt and blocks for input on
 // standard input, put into raw mode for the duration so a key doesn't need
-// Enter and isn't echoed. Space continues to the next full page; return (or
-// a newline) continues just one line/entry, same as more(1)/less(1)'s own
-// line-at-a-time key; q, Ctrl-C, or Esc quits; anything else is ignored and
-// it keeps waiting. A read error/EOF on standard input is treated the same
-// as space, so an unexpectedly closed input can't hang the listing.
+// Enter and isn't echoed. Space (or f, Ctrl-F) continues to the next full
+// page; return (or e, Ctrl-E, j) continues just one line/entry, same as
+// more(1)/less(1)'s own line-at-a-time key; G prints the rest of the
+// listing without pausing again, same as less(1)'s own "jump to the end"
+// -- forward-only, like everything else here, so it's really "stop
+// pausing" rather than an actual jump (this pager can't skip ahead
+// without drawing what it skipped: a thumbnail can only ever be drawn
+// once its own page has actually been printed). q, Ctrl-C, or Esc quits;
+// anything else is ignored and it keeps waiting. A read error/EOF on
+// standard input is treated the same as space, so an unexpectedly closed
+// input can't hang the listing.
 //
 // lookup is nil for a page with no thumbnails at all, in which case this
 // is exactly the plain keys-only prompt above. Otherwise (experimental --
@@ -383,10 +400,12 @@ func waitForContinuePlain() pagerAction {
 			return pagerActionPage
 		}
 		switch buf[0] {
-		case ' ':
+		case ' ', 'f', 'F', 6 /* Ctrl-F */ :
 			return pagerActionPage
-		case '\r', '\n':
+		case '\r', '\n', 'e', 'E', 5 /* Ctrl-E */, 'j', 'J':
 			return pagerActionLine
+		case 'G':
+			return pagerActionEnd
 		case 'q', 'Q', 3 /* Ctrl-C */, 27 /* Esc */ :
 			return pagerActionQuit
 		}
@@ -470,14 +489,16 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 			clicked = path
 		case escEventKey:
 			switch key {
-			case ' ':
+			case ' ', 'f', 'F', 6 /* Ctrl-F */ :
 				if clicked != "" {
 					launchQuickLook(clicked)
 					continue
 				}
 				return pagerActionPage
-			case '\r', '\n':
+			case '\r', '\n', 'e', 'E', 5 /* Ctrl-E */, 'j', 'J':
 				return pagerActionLine
+			case 'G':
+				return pagerActionEnd
 			case 'q', 'Q', 3 /* Ctrl-C */, 27 /* Esc */ :
 				return pagerActionQuit
 			}
@@ -665,6 +686,10 @@ outer:
 					// advance below, just finish.
 					continue outer
 				}
+			case pagerActionEnd:
+				// See printPaginated()'s own pagerActionEnd case.
+				canPrompt = false
+				continue outer
 			default: // pagerActionPage
 				continue outer
 			}
