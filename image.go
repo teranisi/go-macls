@@ -29,14 +29,43 @@ var imageExtensions = map[string]bool{
 // defaultQLExtensions are the extensions -I treats as Quick Look thumbnail
 // candidates (see qlExtensions, --ql-ext) beyond imageExtensions' own image
 // files, unless --ql-ext overrides them. Word/Excel/PowerPoint's binary and
-// OOXML formats: real Quick Look generators for these ship with macOS
-// itself (Preview.app etc.), no Office installation needed. Quick Look
-// itself isn't limited to Office documents, so any other extension with a
-// real (non-generic-icon) Quick Look generator is a candidate to add here
+// OOXML formats, and QuickTime's own movie formats: real Quick Look
+// generators for all of these ship with macOS itself (Preview.app,
+// QuickTime Player, etc.), no separate installation needed. Quick Look
+// itself isn't limited to these, so any other extension with a real
+// (non-generic-icon) Quick Look generator is a candidate to add here
 // later.
+//
+// The thumbnail itself (qlmanageThumbnail(), qlmanage -t) has been fine
+// for .mov on a real machine -- it's launchQuickLook()'s own qlmanage -p
+// (the full preview window a click opens), which this package's own
+// qlPreviewUnsupportedExtensions below refuses to even try for exactly
+// these extensions, that's been observed to abort() there instead; see
+// its own doc comment.
 var defaultQLExtensions = map[string]bool{
 	".docx": true, ".xlsx": true, ".pptx": true,
 	".doc": true, ".xls": true, ".ppt": true,
+	".mov": true, ".mp4": true, ".m4v": true,
+}
+
+// qlPreviewUnsupportedExtensions are extensions launchQuickLook() refuses
+// to even try a full qlmanage -p preview for, despite their thumbnail
+// (qlmanage -t, above) working fine: on a real machine, qlmanage -p has
+// crashed for every single .mov file tried, an uncaught Objective-C
+// exception (NSException, not a plain segfault) thrown from deep inside
+// AVKitCore's own AVPlayerItem category while QuickLookUI's movie
+// generator sets up chapter/scrubber UI for the preview panel -- and
+// unlike the earlier-suspected content-specific glitch this looked like
+// at first, every .mov triggers it, while the exact same file previews
+// fine via Finder's own Quick Look (Space). That split points at
+// qlmanage -p's own minimal host environment, not any real .mov file
+// content: whatever AVKit setup Finder provides its own Quick Look
+// panel isn't there when qlmanage -p hosts the same panel standalone.
+// .mp4/.m4v share the same "Movie.qldisplay" generator as .mov, so the
+// same crash is assumed for them too, though only .mov has actually been
+// observed to.
+var qlPreviewUnsupportedExtensions = map[string]bool{
+	".mov": true, ".mp4": true, ".m4v": true,
 }
 
 // qlExtensions selects, beyond imageExtensions, which extensions
