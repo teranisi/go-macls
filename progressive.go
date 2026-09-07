@@ -98,9 +98,20 @@ func planProgressiveImages(fullPaths []string, imgHeight, termHeight int, stacke
 // progressiveTextLayout builds the imgPrefixes/imgSuffixes/imgColWidth
 // buildEntries()/buildFinalEntries() need to lay out and print the text
 // listing immediately: a blank prefix reserving the thumbnail's column
-// (same as the non-progressive path), and a suffix of bare newlines
-// reserving each entry's thumbnail rows -- no image data yet, so nothing
-// here waits on file I/O.
+// (same as the non-progressive path) plus, for a stacked entry, its
+// thumbnail rows too (see below) -- and a suffix of bare newlines
+// reserving a non-stacked entry's own extra thumbnail rows, when its
+// thumbnail is taller than its own text (rare: only once --scale
+// reserves more rows than a single line of text ever needs). No image
+// data is read yet either way, so nothing here waits on file I/O.
+//
+// A stacked entry's own thumbnail rows go in the *prefix*, above its
+// text, not below it in the suffix: a reader sees the picture before the
+// name it belongs to, matching how an icon usually precedes its own
+// label, and renderProgressiveImages() ends up drawing every thumbnail
+// (stacked or not) at the very top of its own entry's block, needing no
+// special-cased offset for the stacked case the way the old
+// image-below-text layout did.
 //
 // The filler is p.rows() minus the entry's own text row count, not p.rows()
 // minus a flat 1: an entry whose printed line is wide enough to wrap on its
@@ -114,8 +125,13 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 	prefixes = make([]string, len(plans))
 	suffixes = make([]string, len(plans))
 	for i, p := range plans {
+		filler := p.rows() - p.textRowCount()
+		if p.stacked && filler > 0 {
+			prefixes[i] = strings.Repeat("\n", filler) + imgColPad
+			continue
+		}
 		prefixes[i] = imgColPad
-		if filler := p.rows() - p.textRowCount(); filler > 0 {
+		if filler > 0 {
 			suffixes[i] = strings.Repeat("\n", filler)
 		}
 	}
@@ -175,10 +191,11 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	for _, i := range order {
+		// Always the top of entry i's own block: a stacked entry's own
+		// thumbnail rows are its block's own first rows now (see
+		// progressiveTextLayout()), same as a non-stacked entry sharing
+		// its first row with its own thumbnail.
 		rowsUp := totalRows - starts[i]
-		if plans[i].stacked {
-			rowsUp -= plans[i].textRowCount()
-		}
 		if rowsUp >= termHeight {
 			// Already scrolled off; unreachable without risking
 			// drawing over the wrong row.
