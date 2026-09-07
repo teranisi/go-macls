@@ -29,14 +29,21 @@ var imageExtensions = map[string]bool{
 // defaultQLExtensions are the extensions -I treats as Quick Look thumbnail
 // candidates (see qlExtensions, --ql-ext) beyond imageExtensions' own image
 // files, unless --ql-ext overrides them. Word/Excel/PowerPoint's binary and
-// OOXML formats: real Quick Look generators for these ship with macOS
-// itself (Preview.app etc.), no Office installation needed. Quick Look
-// itself isn't limited to Office documents, so any other extension with a
-// real (non-generic-icon) Quick Look generator is a candidate to add here
+// OOXML formats, and QuickTime's own movie formats: real Quick Look
+// generators for all of these ship with macOS itself (Preview.app,
+// QuickTime Player, etc.), no separate installation needed. Quick Look
+// itself isn't limited to these, so any other extension with a real
+// (non-generic-icon) Quick Look generator is a candidate to add here
 // later.
+//
+// The thumbnail itself (qlmanageThumbnail(), qlmanage -t) has been fine
+// for .mov on a real machine -- it's launchQuickLook()'s own qlmanage -p
+// (the full preview window a click opens) that's been observed to
+// segfault on some .mov files there instead; see its own doc comment.
 var defaultQLExtensions = map[string]bool{
 	".docx": true, ".xlsx": true, ".pptx": true,
 	".doc": true, ".xls": true, ".ppt": true,
+	".mov": true, ".mp4": true, ".m4v": true,
 }
 
 // qlExtensions selects, beyond imageExtensions, which extensions
