@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -14,12 +16,13 @@ import (
 // Experimental: --paging's "click a thumbnail, press space for a real Quick
 // Look window" prototype. Scoped entirely to the --paging prompt (the only
 // place macls already reads raw keystrokes interactively), it turns on
-// xterm-style mouse click reporting only while blocked at the "-- more --"
-// prompt, maps a reported click back to whichever entry's thumbnail sits
-// there (using the same row/column bookkeeping already computed to draw
-// thumbnails in the first place), and shells out to qlmanage -p -- macOS's
-// own Quick Look panel, a real GUI window -- when space is next pressed
-// while that entry is still the one last clicked.
+// xterm-style mouse click reporting only while blocked at the pager's own
+// prompt (see pagerPrompt), maps a reported click back to whichever
+// entry's thumbnail sits there (using the same row/column bookkeeping
+// already computed to draw thumbnails in the first place), and shells out
+// to qlmanage -p -- macOS's own Quick Look panel, a real GUI window --
+// when space is next pressed while that entry is still the one last
+// clicked.
 //
 // Deliberately click-gated, not hover-triggered: an earlier version fired
 // qlmanage -p just from the mouse passing over a thumbnail, which turned
@@ -219,14 +222,147 @@ func parseSGRMouse(seq []byte) (cb, cx, cy int, ok bool) {
 	return cb, cx, cy, true
 }
 
-// clickEntry maps a terminal cell -- rowsUp (how many rows above the
-// prompt's own line, 1 = the row directly above it) and col (1-based
-// terminal column) -- to the full path of the thumbnail entry occupying
-// that cell, if any. Built fresh for each page by printPaginated()/
-// printPaginatedMulti() from the same row/column bookkeeping used to
-// actually draw thumbnails (see renderProgressiveImages()/
-// renderProgressiveMultiImages()).
-type clickEntry func(rowsUp, col int) (path string, ok bool)
+// clickEntry maps a terminal cell -- rowsUp (how many rows above
+// wherever the cursor sat right after this page's own content was
+// printed, before the pager's own prompt itself; see
+// waitForContinueClick()'s contentEndRow -- deliberately not the
+// cursor's current position, so this stays valid across a redraw()
+// call whenever the prompt is redisplayed) and col (1-based terminal
+// column) -- to the full path of the thumbnail entry occupying that
+// cell (if any) and a redraw closure (see redrawEntryIcon()/
+// redrawEntryText()) that re-paints that same entry's own already-
+// on-screen highlight border (or name text, in multi-column output)
+// with (or without) a highlight, so a click can visibly show which
+// entry is currently selected. Built fresh for each page by
+// printPaginated()/printPaginatedMulti() from the same row/column
+// bookkeeping used to actually draw thumbnails (see
+// renderProgressiveImages()/renderProgressiveMultiImages()).
+type clickEntry func(rowsUp, col int) (path string, redraw func(highlight bool), ok bool)
+
+// withReverseVideo re-emits s (an entry's own already-colored name/tag
+// text) wrapped in SGR 7 (reverse video), keeping it active throughout
+// even across s's own internal "\033[0m" resets (printed between one
+// colored segment -- a Finder tag, a stripe -- and the next) by
+// reasserting "\033[7m" immediately after each one; a plain wrap alone
+// would have s's own first internal reset cancel the reverse attribute
+// early. Reverse video, rather than a fixed highlight color, adapts
+// automatically to whatever the terminal's actual foreground/background
+// happen to be, light or dark theme alike.
+func withReverseVideo(s string) string {
+	return "\033[7m" + strings.ReplaceAll(s, "\033[0m", "\033[0m\033[7m") + "\033[0m"
+}
+
+// redrawEntryText builds a clickEntry's own redraw closure for one
+// entry's own name/tag text, whose block starts blockTop rows above
+// wherever the cursor sat right after this page's own content was
+// printed, before the pager's own prompt itself (see
+// waitForContinueClick()'s contentEndRow) -- the same reference point
+// rowsUp/col already use for resolving a click in the first place. This
+// stays valid as the reference point across the whole prompt's lifetime
+// (not just the instant it's first displayed) because pagerPrompt is a
+// single character: printing it can never itself wrap to a second
+// physical row and move the cursor any further than that.
+//
+// Jumps the cursor blockTop rows up and colRight columns right,
+// reprinting text (or, if highlight, the same text wrapped via
+// withReverseVideo()), then restoring the cursor exactly where it was via
+// DECSC/DECRC, the same as renderProgressiveImages(). text is expected to
+// already exclude the entry's own reserved image-column padding --
+// colRight is where it starts, right after that padding -- so this never
+// touches, let alone erases, the thumbnail drawn there.
+func redrawEntryText(blockTop, colRight int, text string) func(highlight bool) {
+	return func(highlight bool) {
+		out := text
+		if highlight {
+			out = withReverseVideo(text)
+		}
+		fmt.Print("\0337") // DECSC: save cursor position
+		if blockTop > 0 {
+			fmt.Printf("\033[%dA", blockTop)
+		}
+		fmt.Print("\r")
+		if colRight > 0 {
+			fmt.Printf("\033[%dC", colRight)
+		}
+		fmt.Print(out)
+		fmt.Print("\0338") // DECRC: restore cursor position
+	}
+}
+
+// firstLineTextAfterPad returns line's own first physical line (up to any
+// embedded "\n" -- see progressiveTextLayout()'s filler suffix) with its
+// leading imgColWidth bytes (the entry's own reserved, blank image-column
+// padding -- always plain spaces, never containing an escape sequence, so
+// slicing by byte count is exact) removed, for redrawEntryText()'s own
+// text argument.
+func firstLineTextAfterPad(line string, imgColWidth int) string {
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	if len(line) >= imgColWidth {
+		return line[imgColWidth:]
+	}
+	return line
+}
+
+// drawnIconHeight is the height (in rows) renderProgressiveImages() actually
+// declares for an entry's own thumbnail -- one row less than boxHeight (the
+// full height planProgressiveImages() reserved for it), when boxHeight
+// leaves room to spare one, so the box's own last row is always left
+// blank. redrawEntryIcon() paints that spare row (and the already-blank
+// gap column to the icon's own right -- see imgColWidth) in reverse video
+// to show a clicked entry's selection, without ever touching the icon's
+// own cells: toggling the highlight on or off never needs to re-fetch or
+// re-encode the actual image.
+func drawnIconHeight(boxHeight int) int {
+	if boxHeight > 1 {
+		return boxHeight - 1
+	}
+	return boxHeight
+}
+
+// redrawEntryIcon builds a clickEntry's own redraw closure for one entry's
+// own thumbnail border, whose box starts blockTop rows above wherever the
+// cursor sat right after this page's own content was printed (see
+// redrawEntryText()'s own doc comment for that reference point).
+//
+// boxHeight is the full height planProgressiveImages() reserved for this
+// entry's thumbnail; drawnHeight (see drawnIconHeight()) is the shorter
+// height the icon itself was actually declared at. Highlighting paints, in
+// reverse video, the imgWidth..imgColWidth gap column (already always
+// blank -- the spacing before the entry's own name) for every row the icon
+// itself occupies, plus a full imgColWidth-wide row below it for any
+// row(s) boxHeight left spare beyond drawnHeight -- an "L" border around
+// the icon that never overlaps its own cells (nor, on a non-stacked entry
+// sharing its first row with the entry's own name text, that name's own
+// columns, which start at imgColWidth).
+func redrawEntryIcon(blockTop, imgWidth, imgColWidth, drawnHeight, boxHeight int) func(highlight bool) {
+	gapCell, fullRow := " ", strings.Repeat(" ", imgColWidth)
+	return func(highlight bool) {
+		hlGap, hlRow := gapCell, fullRow
+		if highlight {
+			hlGap = "\033[7m \033[0m"
+			hlRow = "\033[7m" + fullRow + "\033[0m"
+		}
+		for row := 0; row < boxHeight; row++ {
+			text, col := hlGap, imgWidth
+			if row >= drawnHeight {
+				text, col = hlRow, 0
+			}
+			rowsUp := blockTop - row
+			fmt.Print("\0337") // DECSC: save cursor position
+			if rowsUp > 0 {
+				fmt.Printf("\033[%dA", rowsUp)
+			}
+			fmt.Print("\r")
+			if col > 0 {
+				fmt.Printf("\033[%dC", col)
+			}
+			fmt.Print(text)
+			fmt.Print("\0338") // DECRC: restore cursor position
+		}
+	}
+}
 
 // singleColumnClickLookup builds a clickEntry for printPaginated()'s
 // -1/-l layout: entries [start, end) are the ones currently visible on
@@ -236,10 +372,13 @@ type clickEntry func(rowsUp, col int) (path string, ok bool)
 // renderProgressiveImages() itself measures rowsUp from wherever the
 // cursor currently sits. A stacked entry's whole block (its own text row
 // plus every image row below it) counts as that entry for click purposes,
-// not just the exact row the image itself draws into. Returns nil if none
-// of [start, end) has a thumbnail at all, so the caller can skip mouse
-// tracking entirely for a page with nothing to click.
-func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, start, end int) clickEntry {
+// not just the exact row the image itself draws into. entryLines is
+// printPaginated()'s own per-entry rendered text (see
+// firstLineTextAfterPad()), imgColWidth its reserved image-column width
+// (imgWidth+1). Returns nil if none of [start, end) has a thumbnail at
+// all, so the caller can skip mouse tracking entirely for a page with
+// nothing to click.
+func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, imgWidth, imgColWidth, start, end int) clickEntry {
 	type span struct{ idx, lo, hi int }
 	var spans []span
 	acc := 0
@@ -253,23 +392,26 @@ func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, st
 	if len(spans) == 0 {
 		return nil
 	}
-	return func(rowsUp, col int) (string, bool) {
+	return func(rowsUp, col int) (string, func(bool), bool) {
 		if col < 1 || col > imgWidth {
-			return "", false
+			return "", nil, false
 		}
 		for _, sp := range spans {
 			if rowsUp >= sp.lo && rowsUp <= sp.hi {
-				return fullPaths[sp.idx], true
+				boxHeight := plans[sp.idx].height
+				redraw := redrawEntryIcon(sp.hi, imgWidth, imgColWidth, drawnIconHeight(boxHeight), boxHeight)
+				return fullPaths[sp.idx], redraw, true
 			}
 		}
-		return "", false
+		return "", nil, false
 	}
 }
 
 // multiColumnClickLookup builds a clickEntry for printPaginatedMulti()'s
 // multi-column layout. rowOfIdx/colOffsetOfIdx are the whole listing's own
 // global (not page-relative) line/column bookkeeping, from
-// computeImageCellOffsets(); lineRows is that same listing's per-line
+// computeImageCellOffsets(); final is that same listing's own per-entry
+// rendered text (see firstLineTextAfterPad()), and lineRows its per-line
 // physical row count (see lineRowCounts()) -- almost always 1, except a
 // line holding one oversized entry alone, which wraps to more than one
 // physical row on its own, same as printPaginated()'s wrapped-line
@@ -283,7 +425,7 @@ func singleColumnClickLookup(fullPaths []string, plans []imagePlan, imgWidth, st
 // singleColumnClickLookup() does per entry -- a line's own wrapped
 // continuation rows count as that line for click purposes, not just its
 // first physical row (the only one an image can actually sit on).
-func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, imgWidth int, lineRows []int, visibleLines int) clickEntry {
+func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, final []string, imgWidth, imgColWidth int, lineRows []int, visibleLines int) clickEntry {
 	any := false
 	for i := range fullPaths {
 		if hasImage[i] && rowOfIdx[i] < visibleLines {
@@ -305,19 +447,19 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 		spans = append(spans, lineSpan{line: line, lo: acc + 1, hi: acc + r})
 		acc += r
 	}
-	return func(rowsUp, col int) (string, bool) {
+	return func(rowsUp, col int) (string, func(bool), bool) {
 		if rowsUp < 1 {
-			return "", false
+			return "", nil, false
 		}
-		targetLine := -1
+		targetLine, targetHi := -1, 0
 		for _, sp := range spans {
 			if rowsUp >= sp.lo && rowsUp <= sp.hi {
-				targetLine = sp.line
+				targetLine, targetHi = sp.line, sp.hi
 				break
 			}
 		}
 		if targetLine < 0 {
-			return "", false
+			return "", nil, false
 		}
 		for i := range fullPaths {
 			if !hasImage[i] || rowOfIdx[i] != targetLine {
@@ -328,11 +470,24 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 			if col < lo || col > hi {
 				continue
 			}
-			return fullPaths[i], true
+			text := firstLineTextAfterPad(final[i], imgColWidth)
+			colRight := colOffsetOfIdx[i] + imgColWidth
+			return fullPaths[i], redrawEntryText(targetHi, colRight, text), true
 		}
-		return "", false
+		return "", nil, false
 	}
 }
+
+// qlProcessMu guards qlProcess, the most recently started qlmanage -p (see
+// launchQuickLook()) -- a package-level, not per-prompt or per-page,
+// variable: Finder's own Quick Look panel is a single window that swaps to
+// whatever's newly selected regardless of which folder that happens in,
+// and launchQuickLook() matches that by tracking across the whole run,
+// not just the current --paging prompt.
+var (
+	qlProcessMu sync.Mutex
+	qlProcess   *os.Process
+)
 
 // launchQuickLook opens path in macOS's own Quick Look panel via
 // qlmanage -p -- a real GUI window, independent of and in addition to
@@ -340,6 +495,12 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 // inline) so it doesn't block the pager's own input loop; the goroutine
 // just reaps the child once its window is closed to avoid a zombie
 // process. No-ops if qlmanage isn't on PATH (e.g. not running on macOS).
+//
+// Killing whatever qlmanage -p this function itself last started, right
+// before starting the new one, matches Finder's own Quick Look behavior:
+// selecting a different file swaps the same panel to it rather than
+// opening a second one alongside the first. Never touches a qlmanage
+// process this function didn't start itself.
 //
 // See this file's own top-of-file comment: qlmanage -p has been observed,
 // on a real machine, to wedge the shared QuickLook service badly enough to
@@ -350,11 +511,20 @@ func launchQuickLook(path string) {
 	if err != nil {
 		return
 	}
+
+	qlProcessMu.Lock()
+	defer qlProcessMu.Unlock()
+	if qlProcess != nil {
+		qlProcess.Kill()
+		qlProcess = nil
+	}
+
 	cmd := exec.Command(qlPath, "-p", path)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		return
 	}
+	qlProcess = cmd.Process
 	go cmd.Wait()
 }

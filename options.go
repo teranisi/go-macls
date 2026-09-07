@@ -439,9 +439,10 @@ func parseOptions(argv []string) (*Options, []string) {
 			case 'I':
 				opts.i = true
 			case 'M':
-				// Shorthand for -I --paging: --paging's own prompt is
-				// literally "-- more --", so M for "more" reads naturally
-				// as its pairing with -I. Not from the Python original --
+				// Shorthand for -I --paging: more(1) is exactly the
+				// pausing behavior --paging gives -I, so M for "more"
+				// reads naturally as its pairing with -I. Not from the
+				// Python original --
 				// like --paging itself, this is Go-port-only, and (unlike
 				// every other single-letter option here) has no meaning
 				// in real ls(1) either, GNU or BSD, to collide with.
@@ -536,9 +537,9 @@ Options:
   -C        Force multi-column output, even when standard output isn't
             a terminal
   -F        Append entry type indicators (/ @ * = |)
-  -I        Show image thumbnails using iTerm2's inline image protocol.
-            Ignored outside iTerm2, or when standard output isn't a
-            terminal.
+  -I        Show image thumbnails using iTerm2's inline image protocol
+            (also supported by WezTerm). Ignored outside iTerm2/WezTerm,
+            or when standard output isn't a terminal.
   --scale=n Multiply the -I thumbnail's width and height by n. Has an
             effect only in -1/-l (the only contexts -I itself is ever
             active in, since it's disabled outright on non-tty output).
@@ -566,8 +567,8 @@ Options:
                          top of the Office default, not replacing it.
             Has no effect without -I. There's no bare "--ql-ext" form
             (unlike --scale/--tag/etc.) -- a value is always required.
-  --paging  Pause with a more(1)-style "-- more --" prompt (space for the
-            next page, return for one more line, q to quit) whenever the
+  --paging  Pause with a more(1)-style ":" prompt (space for the next
+            page, return for one more line, q to quit) whenever the
             listing doesn't fit on one screen -- with -I, thumbnails are
             also filled in afterward as they finish loading, page by
             page, instead of every thumbnail in the whole listing being

@@ -5,8 +5,8 @@ colorized drop-in replacement for macOS's `ls`.
 
 Like the original, it colors filenames by how recently they were modified,
 shows Finder tags as background colors, lays out multi-column output more
-compactly than plain `ls -C`, and (in iTerm2) shows inline image thumbnails
-and makes filenames clickable. Enumerating/sorting directory contents and
+compactly than plain `ls -C`, and (in iTerm2 or WezTerm) shows inline image
+thumbnails and makes filenames clickable. Enumerating/sorting directory contents and
 `-l`'s long-format output are still delegated to the real `ls(1)`, exactly
 like the Python original; everything else (Finder tag lookup, recency
 colors, display width, multi-column layout) is native Go.
@@ -47,16 +47,11 @@ implements the same CLI surface.
 
   `--paging` isn't only about `-I`, though: whenever the listing doesn't
   fit on one screen, it pauses after each screenful with a `more(1)`-style
-  prompt, whether or not `-I` is active —
-
-  ```
-  -- more (space to continue, return for one line, q to quit) --
-  ```
-
-  — space advances to the next full page, return advances just one more
-  line (holding it down steps through the listing one line at a time,
-  same as `more`/`less`), and `q` (also Ctrl-C or Esc) stops early. With
-  `-I`, this is also what guarantees every thumbnail you scroll back to
+  prompt — a bare `:`, same as `less`'s own default — whether or not `-I`
+  is active: space advances to the next full page, return advances just
+  one more line (holding it down steps through the listing one line at a
+  time, same as `more`/`less`), and `q` (also Ctrl-C or Esc) stops early.
+  With `-I`, this is also what guarantees every thumbnail you scroll back to
   was actually drawn: a thumbnail can only be drawn into a row that's
   still on screen, so a page never holds more rows than the terminal can
   show at once. Pagination only kicks in when standard input is a
@@ -64,11 +59,15 @@ implements the same CLI surface.
   back-to-back with no pause.
 
   **Experimental, no equivalent in the Python original either:** with
-  `-I`, clicking a thumbnail at the `-- more --` prompt and then pressing
+  `-I`, clicking a thumbnail at that `:` prompt and then pressing
   space opens that entry in a real Quick Look window (`qlmanage -p`)
   instead of advancing — the prompt keeps waiting at the same page either
-  way, so this doesn't cost you your place in the listing. Clicking
-  elsewhere first deselects it. It turns on xterm-style mouse click
+  way, so this doesn't cost you your place in the listing. The clicked
+  entry's own thumbnail is drawn one row shorter than its reserved box, so
+  the spare row below it (plus the already-blank gap column to its right)
+  can be painted in reverse video to show it's currently selected, without
+  ever touching the thumbnail's own pixels; clicking elsewhere first
+  deselects it (and un-does the highlight). It turns on xterm-style mouse click
   reporting only for the duration of that one prompt (asking the terminal
   for its cursor position first, via a Device Status Report, to know
   where each entry's own row actually is on screen), so it has no effect

@@ -138,6 +138,60 @@ func dotExtraWidth(dotTagnums []int) int {
 	return len(dotTagnums) + 1
 }
 
+// tagExtras holds each entry's own Finder-tag lookup (bgNums/dotTagnums/
+// tags -- buildEntries()'s own fields, computed once here instead so
+// they're available before it runs) and the resulting extra display
+// width beyond the plain name (extraWidth[i], see computeTagExtras()):
+// dotExtraWidth()'s colored dots, plus buildTagLabel()'s own bracketed
+// label width under --tag=str. Both listTarget()'s pre-image-layout
+// width estimate (textWidth(), needed before buildEntries() itself runs
+// -- see its own doc comment) and buildEntries()'s dispLen need the
+// exact same number here, so a tagged file's own extra width doesn't
+// silently go uncounted in one but not the other.
+type tagExtras struct {
+	bgNums     []*int
+	dotTagnums [][]int
+	tags       [][]finderTag
+	extraWidth []int
+}
+
+// computeTagExtras runs fetchTagLookups() once for fullPaths, in their
+// current order (already reordered by -X/--group-directories-first, if
+// applied -- the same order buildEntries() and textWidth() both index by
+// by position, not original ls order). All fields come back zero-valued,
+// with fetchTagLookups() skipped entirely, when opts.tag/opts.useColor
+// mean tags aren't needed anywhere in this listing at all.
+func computeTagExtras(fullPaths []string, opts *Options) tagExtras {
+	n := len(fullPaths)
+	te := tagExtras{
+		bgNums:     make([]*int, n),
+		dotTagnums: make([][]int, n),
+		tags:       make([][]finderTag, n),
+		extraWidth: make([]int, n),
+	}
+	needTags := opts.tag != "off" && (opts.useColor || opts.tag == "str")
+	if !needTags {
+		return te
+	}
+	lookups := fetchTagLookups(fullPaths, opts.tag)
+	for i, lookup := range lookups {
+		bgNum, dotTagnums := lookup.bgNum, lookup.dotTagnums
+		if !opts.useColor {
+			bgNum, dotTagnums = nil, nil
+		}
+		te.bgNums[i] = bgNum
+		te.dotTagnums[i] = dotTagnums
+		extra := dotExtraWidth(dotTagnums)
+		if opts.tag == "str" {
+			te.tags[i] = lookup.allTags
+			_, tagExtra := buildTagLabel(lookup.allTags, false, opts.useTruecolor, opts.tagColors, "")
+			extra += tagExtra
+		}
+		te.extraWidth[i] = extra
+	}
+	return te
+}
+
 // buildTagLabel builds the --tag display for allTags: a leading space
 // followed by every Finder tag name, comma-separated inside brackets.
 // bgPart, if given (a "48;..." SGR parameter string), is painted behind the

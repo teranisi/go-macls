@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -142,23 +144,135 @@ func supportsTruecolor() bool {
 	return v == "truecolor" || v == "24bit"
 }
 
+// iterm2Supported reports whether the inline image protocol (OSC 1337) is
+// available: iTerm2 itself, or WezTerm, which also implements it. Also
+// checks LC_TERMINAL, which iTerm2 (but not WezTerm) sets, for cases like
+// over SSH where the terminal app can't be detected directly via
+// TERM_PROGRAM.
 func iterm2Supported() bool {
-	return os.Getenv("TERM_PROGRAM") == "iTerm.app" || os.Getenv("LC_TERMINAL") == "iTerm2"
+	switch os.Getenv("TERM_PROGRAM") {
+	case "iTerm.app", "WezTerm":
+		return true
+	}
+	return os.Getenv("LC_TERMINAL") == "iTerm2"
 }
 
-// runLs shells out to real ls(1) with flags + lsFlags + paths and returns
-// its stdout as a list of lines (no trailing empty line).
+// lsEscapeFlag makes real ls(1) escape any nongraphic byte (and its own
+// escape marker, backslash) in a name rather than emitting it raw --
+// notably including a literal embedded newline, which runLs() would
+// otherwise be unable to tell apart from its own newline-per-entry output
+// format, splitting that one entry into two bogus ones. macOS's BSD ls
+// spells this -B; GNU coreutils' ls (Linux, WSL) uses that same letter for
+// something else entirely (--ignore-backups, dropping "*~" files from the
+// listing) and spells this -b (--escape) instead -- so which one is
+// passed depends on the platform, same reasoning as -X's own
+// platform-specific meaning (see buildLsFlags()).
+//
+// Confirmed (macOS's own ls, and GNU coreutils' ls via Homebrew's gls)
+// that neither form of escaping touches a valid multibyte UTF-8
+// character -- only genuinely nongraphic bytes and a literal backslash get
+// escaped -- so this has no visible effect on any name that didn't need
+// it in the first place. See unescapeLsName() for reversing it.
+func lsEscapeFlag() string {
+	if runtime.GOOS == "darwin" {
+		return "-B"
+	}
+	return "-b"
+}
+
+// lsEscapeCStyle are the single-letter escapes GNU coreutils' ls -b
+// (--escape) uses for these specific bytes, backslash (its own escape
+// marker) included -- used by unescapeLsName() to reverse them. Never
+// produced by macOS's BSD ls -B, which always uses \NNN octal instead,
+// even for these same bytes (confirmed: newline comes back as \012,
+// backslash as \134) -- but since BSD's octal escapes always put a digit
+// right after the backslash, never one of these letters, checking for
+// both forms unconditionally is unambiguous regardless of which ls
+// produced the input.
+//
+// ' ' (a literal escaped space, "\ ") is GNU's own addition beyond the
+// standard C escapes: a plain space isn't "nongraphic", but GNU's -b
+// still escapes it this way (confirmed against a real "has space.txt"),
+// presumably since ls uses spaces as its own column separator elsewhere.
+// BSD's -B escapes it as octal \040 instead, already handled by the
+// octal branch below without needing an entry here.
+var lsEscapeCStyle = map[byte]byte{
+	'a': 0x07, 'b': 0x08, 'f': 0x0C, 'n': 0x0A,
+	'r': 0x0D, 't': 0x09, 'v': 0x0B, '\\': 0x5C, ' ': 0x20,
+}
+
+// unescapeLsName reverses lsEscapeFlag()'s escaping of nongraphic bytes
+// and the backslash escape marker itself in one line of ls(1) output (a
+// whole -1 entry, or a whole -l line, permissions/owner/size/date prefix
+// included -- never itself containing a backslash, so unescaping the
+// entire line rather than just the trailing name is safe and avoids
+// needing to locate the name first).
+//
+// Works byte-by-byte rather than rune-by-rune, since an escaped byte can
+// be any value 0-255, not just ASCII -- ls itself never escapes a valid
+// multibyte UTF-8 character (see lsEscapeFlag()), so in practice this only
+// ever reconstructs plain ASCII control bytes or backslash.
+func unescapeLsName(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	out := make([]byte, 0, len(s))
+	i, n := 0, len(s)
+	for i < n {
+		if s[i] == '\\' && i+1 < n {
+			if b, ok := lsEscapeCStyle[s[i+1]]; ok {
+				out = append(out, b)
+				i += 2
+				continue
+			}
+			if i+3 < n && isOctalDigit(s[i+1]) && isOctalDigit(s[i+2]) && isOctalDigit(s[i+3]) {
+				v := int(s[i+1]-'0')*64 + int(s[i+2]-'0')*8 + int(s[i+3]-'0')
+				out = append(out, byte(v&0xFF))
+				i += 4
+				continue
+			}
+		}
+		out = append(out, s[i])
+		i++
+	}
+	return string(out)
+}
+
+func isOctalDigit(b byte) bool {
+	return b >= '0' && b <= '7'
+}
+
+// runLs shells out to real ls(1) with flags + lsFlags + lsEscapeFlag() +
+// paths and returns its stdout as a list of lines (no trailing empty
+// line), each with lsEscapeFlag()'s own escaping reversed (see
+// unescapeLsName()) so callers see the same raw names/lines this always
+// returned before that flag was added.
+//
+// This port deliberately delegates directory enumeration and -l
+// formatting to ls(1) itself rather than reimplementing it, so there's no
+// fallback if ls itself can't be found on PATH -- exits(1) with a
+// one-line message instead of silently returning an empty listing.
 func runLs(flags, lsFlags, paths []string) []string {
 	args := append([]string{}, flags...)
 	args = append(args, lsFlags...)
+	args = append(args, lsEscapeFlag())
 	args = append(args, "--")
 	args = append(args, paths...)
 	cmd := exec.Command("ls", args...)
-	out, _ := cmd.Output()
+	out, err := cmd.Output()
+	if err != nil {
+		if _, ok := err.(*exec.Error); ok {
+			fmt.Fprintf(os.Stderr, "%s: 'ls' not found on PATH -- this port shells out to the real ls(1) for directory listing and -l formatting and can't run without it.\n", prog)
+			os.Exit(1)
+		}
+	}
 	text := string(out)
 	lines := strings.Split(text, "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
+	}
+	for i, line := range lines {
+		lines[i] = unescapeLsName(line)
 	}
 	return lines
 }

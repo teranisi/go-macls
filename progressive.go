@@ -20,10 +20,10 @@ import (
 var pagerQuit bool
 
 // imagePlan is the reserved layout for one entry's -I thumbnail in
-// progressive mode (see renderProgressiveImages()): decided from a cheap
-// header peek (see peekImagePixelSize()), before the entry's text is ever
-// printed, so that text output doesn't have to wait for the full image
-// read+encode.
+// progressive mode (see renderProgressiveImages()): decided up front, from
+// termWidth/termHeight and the entry's own textRows alone (see
+// planProgressiveImages()), before the entry's text is ever printed, so
+// that text output doesn't have to wait for the full image read+encode.
 type imagePlan struct {
 	hasImage bool
 	height   int  // reserved thumbnail height in rows; meaningless if !hasImage
@@ -62,23 +62,25 @@ func (p imagePlan) rows() int {
 	return textRows
 }
 
-// planProgressiveImages decides each entry's reserved thumbnail height by
-// peeking at just enough of each image file's header to read its pixel
-// dimensions (see peekImagePixelSize()) -- fast compared to reading and
-// base64-encoding the whole file, which renderProgressiveImages() defers
-// until after the text listing has already been printed.
-func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight int, stackedFlags []bool, textRows []int, ql qlExtensions) []imagePlan {
+// planProgressiveImages decides each entry's reserved thumbnail height --
+// always exactly imgHeight (the same fixed height every --paging thumbnail
+// reserves, regardless of the source image's own aspect ratio: a portrait
+// image ends up letterboxed narrower rather than reserving extra rows for
+// itself, via preserveAspectRatio=1's own "contain" fit -- see
+// buildImagePrefix()). Every entry's reserved row count is therefore
+// knowable up front from termWidth/termHeight and each entry's own
+// textRows alone, with no per-image file read (let alone a header peek at
+// its real pixel dimensions) needed before a page's own row layout can be
+// decided.
+func planProgressiveImages(fullPaths []string, imgHeight, termHeight int, stackedFlags []bool, textRows []int, ql qlExtensions) []imagePlan {
 	plans := make([]imagePlan, len(fullPaths))
-	for i := range plans {
+	height := minInt(imgHeight, termHeight)
+	for i, p := range fullPaths {
 		tr := 1
 		if textRows != nil && i < len(textRows) {
 			tr = textRows[i]
 		}
 		plans[i].textRows = tr
-	}
-	sem := make(chan struct{}, imagePrefixConcurrency)
-	var wg sync.WaitGroup
-	for i, p := range fullPaths {
 		if !isFileFollow(p) {
 			continue
 		}
@@ -86,33 +88,30 @@ func planProgressiveImages(fullPaths []string, imgWidth, imgHeight, termHeight i
 		if !imageExtensions[ext] && !isQLCandidate(p, ext, ql) {
 			continue
 		}
-		stacked := stackedFlags != nil && stackedFlags[i]
 		plans[i].hasImage = true
-		plans[i].height = minInt(imgHeight, termHeight)
-		plans[i].stacked = stacked
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, p, ext string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if pxW, pxH, ok := peekImagePixelSize(p, ext); ok && pxW > 0 && pxH > 0 {
-				plans[i].height = minInt(aspectScaledHeight(imgWidth, pxW, pxH), termHeight)
-				if debugPagingEnabled() {
-					fmt.Fprintf(os.Stderr, "MACLS_DEBUG_PAGING: entry=%d ext=%s pxW=%d pxH=%d -> height=%d path=%s\n", i, ext, pxW, pxH, plans[i].height, p)
-				}
-			}
-		}(i, p, ext)
+		plans[i].height = height
+		plans[i].stacked = stackedFlags != nil && stackedFlags[i]
 	}
-	wg.Wait()
 	return plans
 }
 
 // progressiveTextLayout builds the imgPrefixes/imgSuffixes/imgColWidth
 // buildEntries()/buildFinalEntries() need to lay out and print the text
 // listing immediately: a blank prefix reserving the thumbnail's column
-// (same as the non-progressive path), and a suffix of bare newlines
-// reserving each entry's thumbnail rows -- no image data yet, so nothing
-// here waits on file I/O.
+// (same as the non-progressive path) plus, for a stacked entry, its
+// thumbnail rows too (see below) -- and a suffix of bare newlines
+// reserving a non-stacked entry's own extra thumbnail rows, when its
+// thumbnail is taller than its own text (rare: only once --scale
+// reserves more rows than a single line of text ever needs). No image
+// data is read yet either way, so nothing here waits on file I/O.
+//
+// A stacked entry's own thumbnail rows go in the *prefix*, above its
+// text, not below it in the suffix: a reader sees the picture before the
+// name it belongs to, matching how an icon usually precedes its own
+// label, and renderProgressiveImages() ends up drawing every thumbnail
+// (stacked or not) at the very top of its own entry's block, needing no
+// special-cased offset for the stacked case the way the old
+// image-below-text layout did.
 //
 // The filler is p.rows() minus the entry's own text row count, not p.rows()
 // minus a flat 1: an entry whose printed line is wide enough to wrap on its
@@ -126,8 +125,13 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 	prefixes = make([]string, len(plans))
 	suffixes = make([]string, len(plans))
 	for i, p := range plans {
+		filler := p.rows() - p.textRowCount()
+		if p.stacked && filler > 0 {
+			prefixes[i] = strings.Repeat("\n", filler) + imgColPad
+			continue
+		}
 		prefixes[i] = imgColPad
-		if filler := p.rows() - p.textRowCount(); filler > 0 {
+		if filler > 0 {
 			suffixes[i] = strings.Repeat("\n", filler)
 		}
 	}
@@ -141,7 +145,10 @@ func progressiveTextLayout(plans []imagePlan, imgWidth int) (prefixes, suffixes 
 // the cursor up to the entry's reserved row, draws over the blank padding
 // left there, and returns the cursor to where printing left off (DECSC/
 // DECRC, under a mutex so concurrent draws don't interleave their escape
-// sequences).
+// sequences). The thumbnail itself is declared one row shorter than its
+// own reserved height (see drawnIconHeight()), so its own last reserved
+// row is always left blank -- see redrawEntryIcon(), which paints that
+// spare row in reverse video to show a clicked entry's selection.
 //
 // An entry whose reserved row has already scrolled out of the terminal's
 // visible height is skipped outright: ANSI cursor-up can't reach into
@@ -184,10 +191,11 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, imagePrefixConcurrency)
 	for _, i := range order {
+		// Always the top of entry i's own block: a stacked entry's own
+		// thumbnail rows are its block's own first rows now (see
+		// progressiveTextLayout()), same as a non-stacked entry sharing
+		// its first row with its own thumbnail.
 		rowsUp := totalRows - starts[i]
-		if plans[i].stacked {
-			rowsUp -= plans[i].textRowCount()
-		}
 		if rowsUp >= termHeight {
 			// Already scrolled off; unreachable without risking
 			// drawing over the wrong row.
@@ -198,7 +206,8 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 		go func(i, rowsUp int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			img := buildImagePrefix(fullPaths[i], imgWidth, plans[i].height, termHeight, false, ql)
+			img := buildImagePrefix(fullPaths[i], imgWidth, drawnIconHeight(plans[i].height), termHeight, false, ql)
+			debugLogImageDraw(i, rowsUp, fullPaths[i], img)
 			if img == "" {
 				return
 			}
@@ -215,9 +224,26 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 	wg.Wait()
 }
 
+// pagerPrompt is waitForContinue()'s own prompt string, printed at the
+// bottom of each page it pauses at -- a single ":" (not more(1)'s classic
+// spelled-out "-- more --", nor this pager's own former "-- more (space
+// to continue, return for one line, q to quit) --", both of which could
+// wrap to a second physical row on a narrow enough terminal): once the
+// bottom of a page's own content already sits on the terminal's very
+// last row, printing anything that wraps scrolls the whole screen up to
+// make room for that second row, dragging every thumbnail already drawn
+// there up with it -- which pagerPromptRows below (in reserving only 1
+// row for the prompt) doesn't otherwise account for. A single character
+// can never wrap, so this side-steps that entirely, rather than trying
+// to predict how many rows a longer prompt would actually take. less(1)
+// itself defaults to the same bare ":" (space/return/q here don't match
+// its own bindings, but the prompt itself doesn't spell out any pager's
+// bindings either way, so this doesn't create a false expectation).
+const pagerPrompt = ":"
+
 // pagerPromptRows is how many terminal rows printPaginated() reserves for
-// its own "-- more --" prompt at the bottom of each page, so the prompt
-// itself never pushes the page's own last row off screen.
+// pagerPrompt at the bottom of each page, so the prompt itself never
+// pushes the page's own last row off screen.
 const pagerPromptRows = 1
 
 // printPaginated prints entryLines (one already-rendered line per entry,
@@ -233,7 +259,7 @@ const pagerPromptRows = 1
 // work at all.
 //
 // When there's more than one page and standard input is a terminal, it
-// pauses after each page but the last with a "-- more --" prompt (see
+// pauses after each page but the last with a pagerPrompt prompt (see
 // waitForContinue()): space advances a full page, return advances a single
 // entry (then prompts again, so holding return steps through the listing
 // one entry at a time); otherwise (input isn't interactive) it just keeps
@@ -250,6 +276,7 @@ func printPaginated(entryLines []string, plans []imagePlan, fullPaths []string, 
 		return
 	}
 	entryLines, plans, fullPaths = entryLines[:n], plans[:n], fullPaths[:n]
+	imgColWidth := imgWidth + 1
 
 	pageCapacity := termHeight - pagerPromptRows
 	debugLogPaging(termHeight, pageCapacity, entryLines, plans)
@@ -279,7 +306,7 @@ outer:
 		renderPage(start, i)
 
 		for canPrompt {
-			lookup := singleColumnClickLookup(fullPaths, plans, imgWidth, start, i)
+			lookup := singleColumnClickLookup(fullPaths, entryLines, plans, imgWidth, imgColWidth, start, i)
 			if i >= n && lookup == nil {
 				// Nothing left to page through, and nothing on screen to
 				// click either -- no reason to prompt at all, matching
@@ -317,7 +344,7 @@ const (
 	pagerActionQuit                    // q, Ctrl-C, Esc
 )
 
-// waitForContinue prints a "-- more --" prompt and blocks for input on
+// waitForContinue prints pagerPrompt and blocks for input on
 // standard input, put into raw mode for the duration so a key doesn't need
 // Enter and isn't echoed. Space continues to the next full page; return (or
 // a newline) continues just one line/entry, same as more(1)/less(1)'s own
@@ -339,7 +366,7 @@ func waitForContinue(lookup clickEntry) pagerAction {
 }
 
 func waitForContinuePlain() pagerAction {
-	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
+	fmt.Print(pagerPrompt)
 	defer fmt.Print("\r\033[K") // erase the prompt before the next page
 
 	fd := int(os.Stdin.Fd())
@@ -374,11 +401,6 @@ func waitForContinuePlain() pagerAction {
 // that selection, and a space with nothing selected behaves exactly like
 // the plain prompt.
 func waitForContinueClick(lookup clickEntry) pagerAction {
-	// Same prompt text as the plain (no-thumbnail) prompt -- the
-	// click-to-Quick-Look behavior isn't spelled out here (see README).
-	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
-	defer fmt.Print("\r\033[K")
-
 	fd := int(os.Stdin.Fd())
 	oldState, err := enterRawMode(fd)
 	if err != nil {
@@ -386,7 +408,19 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	}
 	defer exitRawMode(fd, oldState)
 
-	promptRow, haveRow := queryCursorRow(os.Stdin)
+	// Queried before the prompt text below, so it reflects wherever the
+	// cursor sat right after this page's own content was printed --
+	// clickEntry's own rowsUp/redraw reference point (see its doc
+	// comment). pagerPrompt is a single character, so printing it can
+	// never move the cursor down a further row itself -- this stays the
+	// right reference point for the whole lifetime of the prompt, not
+	// just the instant it's first displayed.
+	contentEndRow, haveRow := queryCursorRow(os.Stdin)
+
+	// Same prompt text as the plain (no-thumbnail) prompt -- the
+	// click-to-Quick-Look behavior isn't spelled out here (see README).
+	fmt.Print(pagerPrompt)
+	defer fmt.Print("\r\033[K")
 
 	fmt.Print(mouseTrackingEnable)
 	setMouseTrackingOn(true)
@@ -395,8 +429,20 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 		setMouseTrackingOn(false)
 	}()
 
-	r := newEscReader(os.Stdin)
 	clicked := ""
+	var highlightOff func(bool)
+	// Whatever's currently highlighted (see redrawEntryText()) has to be
+	// turned back off before this prompt goes away -- the next page (or
+	// this same page's own next prompt) gets printed right where this one
+	// currently sits, and leaving a stray reverse-video row behind under
+	// that would look like display corruption once it does.
+	defer func() {
+		if highlightOff != nil {
+			highlightOff(false)
+		}
+	}()
+
+	r := newEscReader(os.Stdin)
 	for {
 		kind, key, col, mouseRow := r.next()
 		switch kind {
@@ -406,13 +452,22 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 			if !haveRow {
 				continue
 			}
-			rowsUp := promptRow - mouseRow
-			path, ok := lookup(rowsUp, col)
-			if ok {
-				clicked = path
-			} else {
-				clicked = "" // clicked elsewhere: deselect
+			rowsUp := contentEndRow - mouseRow
+			path, redraw, ok := lookup(rowsUp, col)
+			if !ok {
+				path = ""
 			}
+			if path == clicked {
+				continue // same entry again, or already deselected
+			}
+			if highlightOff != nil {
+				highlightOff(false)
+			}
+			if ok {
+				redraw(true)
+			}
+			highlightOff = redraw // nil when !ok, clearing it too
+			clicked = path
 		case escEventKey:
 			switch key {
 			case ' ':
@@ -540,12 +595,13 @@ func renderProgressiveMultiImages(fullPaths []string, hasImage []bool, rowOfIdx,
 // printPaginated()'s wrapped-line entries (see lineRowCounts()). Same
 // final-prompt-even-on-one-page behavior as printPaginated() when
 // anything on screen has a thumbnail -- see its own doc comment.
-func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, fullPaths []string, imgWidth, termWidth, termHeight int, ql qlExtensions) {
+func printPaginatedMulti(lines []string, hasImage []bool, rowOfIdx, colOffsetOfIdx []int, final, fullPaths []string, imgWidth, termWidth, termHeight int, ql qlExtensions) {
 	n := len(lines)
 	if n == 0 {
 		return
 	}
 	lineRows := lineRowCounts(lines, termWidth)
+	imgColWidth := imgWidth + 1
 	pageCapacity := termHeight - pagerPromptRows
 	if pageCapacity < 1 {
 		pageCapacity = 1
@@ -588,7 +644,7 @@ outer:
 		start = end
 
 		for canPrompt {
-			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, imgWidth, lineRows, start)
+			lookup := multiColumnClickLookup(fullPaths, hasImage, rowOfIdx, colOffsetOfIdx, final, imgWidth, imgColWidth, lineRows, start)
 			if start >= n && lookup == nil {
 				// Nothing left to page through, and nothing on screen to
 				// click either -- no reason to prompt at all, matching

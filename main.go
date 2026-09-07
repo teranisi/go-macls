@@ -56,7 +56,7 @@ func run() int {
 	if opts.i && !isStdoutTTY() {
 		opts.i = false
 	} else if opts.i && !iterm2Supported() {
-		fmt.Fprintf(os.Stderr, "%s: -I requires iTerm2; disabling thumbnails\n", prog)
+		fmt.Fprintf(os.Stderr, "%s: -I requires iTerm2 or WezTerm; disabling thumbnails\n", prog)
 		opts.i = false
 	}
 
