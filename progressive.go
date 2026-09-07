@@ -207,9 +207,26 @@ func renderProgressiveImages(fullPaths []string, plans []imagePlan, imgWidth, te
 	wg.Wait()
 }
 
+// pagerPrompt is waitForContinue()'s own prompt string, printed at the
+// bottom of each page it pauses at -- a single ":" (not more(1)'s classic
+// spelled-out "-- more --", nor this pager's own former "-- more (space
+// to continue, return for one line, q to quit) --", both of which could
+// wrap to a second physical row on a narrow enough terminal): once the
+// bottom of a page's own content already sits on the terminal's very
+// last row, printing anything that wraps scrolls the whole screen up to
+// make room for that second row, dragging every thumbnail already drawn
+// there up with it -- which pagerPromptRows below (in reserving only 1
+// row for the prompt) doesn't otherwise account for. A single character
+// can never wrap, so this side-steps that entirely, rather than trying
+// to predict how many rows a longer prompt would actually take. less(1)
+// itself defaults to the same bare ":" (space/return/q here don't match
+// its own bindings, but the prompt itself doesn't spell out any pager's
+// bindings either way, so this doesn't create a false expectation).
+const pagerPrompt = ":"
+
 // pagerPromptRows is how many terminal rows printPaginated() reserves for
-// its own "-- more --" prompt at the bottom of each page, so the prompt
-// itself never pushes the page's own last row off screen.
+// pagerPrompt at the bottom of each page, so the prompt itself never
+// pushes the page's own last row off screen.
 const pagerPromptRows = 1
 
 // printPaginated prints entryLines (one already-rendered line per entry,
@@ -225,7 +242,7 @@ const pagerPromptRows = 1
 // work at all.
 //
 // When there's more than one page and standard input is a terminal, it
-// pauses after each page but the last with a "-- more --" prompt (see
+// pauses after each page but the last with a pagerPrompt prompt (see
 // waitForContinue()): space advances a full page, return advances a single
 // entry (then prompts again, so holding return steps through the listing
 // one entry at a time); otherwise (input isn't interactive) it just keeps
@@ -310,7 +327,7 @@ const (
 	pagerActionQuit                    // q, Ctrl-C, Esc
 )
 
-// waitForContinue prints a "-- more --" prompt and blocks for input on
+// waitForContinue prints pagerPrompt and blocks for input on
 // standard input, put into raw mode for the duration so a key doesn't need
 // Enter and isn't echoed. Space continues to the next full page; return (or
 // a newline) continues just one line/entry, same as more(1)/less(1)'s own
@@ -332,7 +349,7 @@ func waitForContinue(lookup clickEntry) pagerAction {
 }
 
 func waitForContinuePlain() pagerAction {
-	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
+	fmt.Print(pagerPrompt)
 	defer fmt.Print("\r\033[K") // erase the prompt before the next page
 
 	fd := int(os.Stdin.Fd())
@@ -377,27 +394,16 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	// Queried before the prompt text below, so it reflects wherever the
 	// cursor sat right after this page's own content was printed --
 	// clickEntry's own rowsUp/redraw reference point (see its doc
-	// comment) -- rather than the prompt's own line, which can itself
-	// wrap to more than one physical row on a narrow terminal.
-	contentEndRow, haveContentRow := queryCursorRow(os.Stdin)
+	// comment). pagerPrompt is a single character, so printing it can
+	// never move the cursor down a further row itself -- this stays the
+	// right reference point for the whole lifetime of the prompt, not
+	// just the instant it's first displayed.
+	contentEndRow, haveRow := queryCursorRow(os.Stdin)
 
 	// Same prompt text as the plain (no-thumbnail) prompt -- the
 	// click-to-Quick-Look behavior isn't spelled out here (see README).
-	fmt.Print("-- more (space to continue, return for one line, q to quit) --")
+	fmt.Print(pagerPrompt)
 	defer fmt.Print("\r\033[K")
-
-	promptRow, havePromptRow := queryCursorRow(os.Stdin)
-	haveRow := haveContentRow && havePromptRow
-	// How many rows the prompt just printed above actually wrapped into,
-	// beyond contentEndRow -- 0 on any terminal wide enough for it to fit
-	// on one line. redrawEntryText()'s own closures need this at call
-	// time (now, not when lookup itself was built, before the prompt was
-	// printed) to convert their own contentEndRow-relative position into
-	// an actual jump from wherever the cursor currently sits.
-	extraRows := 0
-	if haveRow {
-		extraRows = promptRow - contentEndRow
-	}
 
 	fmt.Print(mouseTrackingEnable)
 	setMouseTrackingOn(true)
@@ -407,7 +413,7 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	}()
 
 	clicked := ""
-	var highlightOff func(int, bool)
+	var highlightOff func(bool)
 	// Whatever's currently highlighted (see redrawEntryText()) has to be
 	// turned back off before this prompt goes away -- the next page (or
 	// this same page's own next prompt) gets printed right where this one
@@ -415,7 +421,7 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 	// that would look like display corruption once it does.
 	defer func() {
 		if highlightOff != nil {
-			highlightOff(extraRows, false)
+			highlightOff(false)
 		}
 	}()
 
@@ -438,10 +444,10 @@ func waitForContinueClick(lookup clickEntry) pagerAction {
 				continue // same entry again, or already deselected
 			}
 			if highlightOff != nil {
-				highlightOff(extraRows, false)
+				highlightOff(false)
 			}
 			if ok {
-				redraw(extraRows, true)
+				redraw(true)
 			}
 			highlightOff = redraw // nil when !ok, clearing it too
 			clicked = path

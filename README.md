@@ -47,16 +47,11 @@ implements the same CLI surface.
 
   `--paging` isn't only about `-I`, though: whenever the listing doesn't
   fit on one screen, it pauses after each screenful with a `more(1)`-style
-  prompt, whether or not `-I` is active —
-
-  ```
-  -- more (space to continue, return for one line, q to quit) --
-  ```
-
-  — space advances to the next full page, return advances just one more
-  line (holding it down steps through the listing one line at a time,
-  same as `more`/`less`), and `q` (also Ctrl-C or Esc) stops early. With
-  `-I`, this is also what guarantees every thumbnail you scroll back to
+  prompt — a bare `:`, same as `less`'s own default — whether or not `-I`
+  is active: space advances to the next full page, return advances just
+  one more line (holding it down steps through the listing one line at a
+  time, same as `more`/`less`), and `q` (also Ctrl-C or Esc) stops early.
+  With `-I`, this is also what guarantees every thumbnail you scroll back to
   was actually drawn: a thumbnail can only be drawn into a row that's
   still on screen, so a page never holds more rows than the terminal can
   show at once. Pagination only kicks in when standard input is a
@@ -64,7 +59,7 @@ implements the same CLI surface.
   back-to-back with no pause.
 
   **Experimental, no equivalent in the Python original either:** with
-  `-I`, clicking a thumbnail at the `-- more --` prompt and then pressing
+  `-I`, clicking a thumbnail at that `:` prompt and then pressing
   space opens that entry in a real Quick Look window (`qlmanage -p`)
   instead of advancing — the prompt keeps waiting at the same page either
   way, so this doesn't cost you your place in the listing. The clicked

@@ -15,12 +15,13 @@ import (
 // Experimental: --paging's "click a thumbnail, press space for a real Quick
 // Look window" prototype. Scoped entirely to the --paging prompt (the only
 // place macls already reads raw keystrokes interactively), it turns on
-// xterm-style mouse click reporting only while blocked at the "-- more --"
-// prompt, maps a reported click back to whichever entry's thumbnail sits
-// there (using the same row/column bookkeeping already computed to draw
-// thumbnails in the first place), and shells out to qlmanage -p -- macOS's
-// own Quick Look panel, a real GUI window -- when space is next pressed
-// while that entry is still the one last clicked.
+// xterm-style mouse click reporting only while blocked at the pager's own
+// prompt (see pagerPrompt), maps a reported click back to whichever
+// entry's thumbnail sits there (using the same row/column bookkeeping
+// already computed to draw thumbnails in the first place), and shells out
+// to qlmanage -p -- macOS's own Quick Look panel, a real GUI window --
+// when space is next pressed while that entry is still the one last
+// clicked.
 //
 // Deliberately click-gated, not hover-triggered: an earlier version fired
 // qlmanage -p just from the mouse passing over a thumbnail, which turned
@@ -222,19 +223,20 @@ func parseSGRMouse(seq []byte) (cb, cx, cy int, ok bool) {
 
 // clickEntry maps a terminal cell -- rowsUp (how many rows above
 // wherever the cursor sat right after this page's own content was
-// printed, before the "-- more --" prompt itself; see
+// printed, before the pager's own prompt itself; see
 // waitForContinueClick()'s contentEndRow -- deliberately not the
-// prompt's own line, which can itself span more than one physical row on
-// a narrow terminal) and col (1-based terminal column) -- to the full
-// path of the thumbnail entry occupying that cell (if any) and a redraw
-// closure (see redrawEntryIcon()/redrawEntryText()) that re-paints that
-// same entry's own already-on-screen highlight border (or name text, in
-// multi-column output) with (or without) a highlight, so a click can
-// visibly show which entry is currently selected. Built fresh for
-// each page by printPaginated()/printPaginatedMulti() from the same row/
-// column bookkeeping used to actually draw thumbnails (see
+// cursor's current position, so this stays valid across a redraw()
+// call whenever the prompt is redisplayed) and col (1-based terminal
+// column) -- to the full path of the thumbnail entry occupying that
+// cell (if any) and a redraw closure (see redrawEntryIcon()/
+// redrawEntryText()) that re-paints that same entry's own already-
+// on-screen highlight border (or name text, in multi-column output)
+// with (or without) a highlight, so a click can visibly show which
+// entry is currently selected. Built fresh for each page by
+// printPaginated()/printPaginatedMulti() from the same row/column
+// bookkeeping used to actually draw thumbnails (see
 // renderProgressiveImages()/renderProgressiveMultiImages()).
-type clickEntry func(rowsUp, col int) (path string, redraw func(extraRows int, highlight bool), ok bool)
+type clickEntry func(rowsUp, col int) (path string, redraw func(highlight bool), ok bool)
 
 // withReverseVideo re-emits s (an entry's own already-colored name/tag
 // text) wrapped in SGR 7 (reverse video), keeping it active throughout
@@ -252,34 +254,30 @@ func withReverseVideo(s string) string {
 // redrawEntryText builds a clickEntry's own redraw closure for one
 // entry's own name/tag text, whose block starts blockTop rows above
 // wherever the cursor sat right after this page's own content was
-// printed, before the "-- more --" prompt itself (see
+// printed, before the pager's own prompt itself (see
 // waitForContinueClick()'s contentEndRow) -- the same reference point
-// rowsUp/col already use for resolving a click in the first place, and
-// deliberately not the cursor's current position: the prompt text can
-// itself wrap to more than one physical row on a narrow enough terminal,
-// and that row count isn't known yet when this closure is built (before
-// the prompt has even been printed for this particular display of it).
-// So the caller instead passes extraRows -- however many additional rows
-// separate the cursor's current position from that same reference point
-// -- at call time, once it does know it.
+// rowsUp/col already use for resolving a click in the first place. This
+// stays valid as the reference point across the whole prompt's lifetime
+// (not just the instant it's first displayed) because pagerPrompt is a
+// single character: printing it can never itself wrap to a second
+// physical row and move the cursor any further than that.
 //
-// Jumps the cursor blockTop+extraRows rows up and colRight columns right,
+// Jumps the cursor blockTop rows up and colRight columns right,
 // reprinting text (or, if highlight, the same text wrapped via
 // withReverseVideo()), then restoring the cursor exactly where it was via
 // DECSC/DECRC, the same as renderProgressiveImages(). text is expected to
 // already exclude the entry's own reserved image-column padding --
 // colRight is where it starts, right after that padding -- so this never
 // touches, let alone erases, the thumbnail drawn there.
-func redrawEntryText(blockTop, colRight int, text string) func(extraRows int, highlight bool) {
-	return func(extraRows int, highlight bool) {
+func redrawEntryText(blockTop, colRight int, text string) func(highlight bool) {
+	return func(highlight bool) {
 		out := text
 		if highlight {
 			out = withReverseVideo(text)
 		}
-		rowsUp := blockTop + extraRows
 		fmt.Print("\0337") // DECSC: save cursor position
-		if rowsUp > 0 {
-			fmt.Printf("\033[%dA", rowsUp)
+		if blockTop > 0 {
+			fmt.Printf("\033[%dA", blockTop)
 		}
 		fmt.Print("\r")
 		if colRight > 0 {
@@ -325,8 +323,7 @@ func drawnIconHeight(boxHeight int) int {
 // redrawEntryIcon builds a clickEntry's own redraw closure for one entry's
 // own thumbnail border, whose box starts blockTop rows above wherever the
 // cursor sat right after this page's own content was printed (see
-// redrawEntryText()'s own doc comment for that reference point, and why
-// the caller passes extraRows at call time rather than baking it in here).
+// redrawEntryText()'s own doc comment for that reference point).
 //
 // boxHeight is the full height planProgressiveImages() reserved for this
 // entry's thumbnail; drawnHeight (see drawnIconHeight()) is the shorter
@@ -338,9 +335,9 @@ func drawnIconHeight(boxHeight int) int {
 // the icon that never overlaps its own cells (nor, on a non-stacked entry
 // sharing its first row with the entry's own name text, that name's own
 // columns, which start at imgColWidth).
-func redrawEntryIcon(blockTop, imgWidth, imgColWidth, drawnHeight, boxHeight int) func(extraRows int, highlight bool) {
+func redrawEntryIcon(blockTop, imgWidth, imgColWidth, drawnHeight, boxHeight int) func(highlight bool) {
 	gapCell, fullRow := " ", strings.Repeat(" ", imgColWidth)
-	return func(extraRows int, highlight bool) {
+	return func(highlight bool) {
 		hlGap, hlRow := gapCell, fullRow
 		if highlight {
 			hlGap = "\033[7m \033[0m"
@@ -351,7 +348,7 @@ func redrawEntryIcon(blockTop, imgWidth, imgColWidth, drawnHeight, boxHeight int
 			if row >= drawnHeight {
 				text, col = hlRow, 0
 			}
-			rowsUp := blockTop + extraRows - row
+			rowsUp := blockTop - row
 			fmt.Print("\0337") // DECSC: save cursor position
 			if rowsUp > 0 {
 				fmt.Printf("\033[%dA", rowsUp)
@@ -394,7 +391,7 @@ func singleColumnClickLookup(fullPaths, entryLines []string, plans []imagePlan, 
 	if len(spans) == 0 {
 		return nil
 	}
-	return func(rowsUp, col int) (string, func(int, bool), bool) {
+	return func(rowsUp, col int) (string, func(bool), bool) {
 		if col < 1 || col > imgWidth {
 			return "", nil, false
 		}
@@ -449,7 +446,7 @@ func multiColumnClickLookup(fullPaths []string, hasImage []bool, rowOfIdx, colOf
 		spans = append(spans, lineSpan{line: line, lo: acc + 1, hi: acc + r})
 		acc += r
 	}
-	return func(rowsUp, col int) (string, func(int, bool), bool) {
+	return func(rowsUp, col int) (string, func(bool), bool) {
 		if rowsUp < 1 {
 			return "", nil, false
 		}
