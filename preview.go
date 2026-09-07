@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -504,14 +505,23 @@ var (
 //
 // See this file's own top-of-file comment: qlmanage -p has been observed,
 // on a real machine, to wedge the shared QuickLook service badly enough to
-// freeze Finder along with it -- and, separately, to flat-out segfault on
-// some .mov files there. Either way this process (unlike the thumbnail
-// itself, which reads its own separate qlmanage -t output from disk) never
-// waits on qlmanage -p synchronously, so a crash or a hang here doesn't
-// hang or crash macls -- just that one Quick Look window never appears.
-// Only ever call this for a file the user just explicitly clicked -- never
-// from a passive signal like hovering.
+// freeze Finder along with it. Either way this process (unlike the
+// thumbnail itself, which reads its own separate qlmanage -t output from
+// disk) never waits on qlmanage -p synchronously, so a crash or a hang
+// here doesn't hang or crash macls -- just that one Quick Look window
+// never appears. Only ever call this for a file the user just explicitly
+// clicked -- never from a passive signal like hovering.
+//
+// No-ops instead of even trying for qlPreviewUnsupportedExtensions (see
+// image.go): unlike the general "some files can wedge or crash the
+// shared service" risk above, every single .mov tried has crashed
+// qlmanage -p outright, so there's nothing to gain from spawning it (and
+// racing macOS's own crash reporter) just to watch it fail again.
 func launchQuickLook(path string) {
+	if qlPreviewUnsupportedExtensions[strings.ToLower(filepath.Ext(path))] {
+		return
+	}
+
 	qlPath, err := exec.LookPath("qlmanage")
 	if err != nil {
 		return
