@@ -99,10 +99,10 @@ implements the same CLI surface.
   sequences in a sandbox with no real iTerm2, mouse, or Quick Look window
   to check against.
 - **`-M`, shorthand for `-I --paging`, also with no equivalent upstream.**
-  `--paging`'s own prompt is literally `-- more --`, so `-M` ("more")
-  reads as its natural pairing with `-I`. Unlike every other single-letter
-  option here, `-M` has no meaning in real `ls(1)` at all (GNU or BSD) to
-  collide with.
+  `more(1)` is exactly the pausing behavior `--paging` gives `-I`, so `-M`
+  ("more") reads as its natural pairing with `-I`. Unlike every other
+  single-letter option here, `-M` has no meaning in real `ls(1)` at all
+  (GNU or BSD) to collide with.
 
 ## Build
 
